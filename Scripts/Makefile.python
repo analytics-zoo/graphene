@@ -1,23 +1,25 @@
-# By default, Graphene runs the system Python 3.5 executable.
-PYTHONVERSION ?= python3.5
-PYTHONPATH ?= /usr
+PREFIX ?= /usr
 
-# Fedora/RedHat use /usr/lib64, Ubuntu /usr/lib
-ifneq ($(wildcard $(PYTHONPATH)/lib64/*),)
-	PYTHONLIBDIR = lib64
-else
-	PYTHONLIBDIR = lib
-endif
-PYTHONHOME := $(PYTHONPATH)/$(PYTHONLIBDIR)/$(PYTHONVERSION)
+# By default, Graphene runs default python3.x version
+PYTHON ?= python3
 
-PYTHONDISTHOME := $(PYTHONPATH)/$(PYTHONLIBDIR)/python3/dist-packages
-ifeq ($(wildcard $(PYTHONDISTHOME)/*),)
+PYTHON_STDLIB := $(shell $(PYTHON) -c \
+	"import sysconfig; print(sysconfig.get_paths()['stdlib'])")
+PYTHON_PLATSTDLIB := $(shell $(PYTHON) -c \
+	"import sysconfig; print(sysconfig.get_paths()['platstdlib'])")
+PYTHON_PURELIB := $(shell $(PYTHON) -c \
+	"import sysconfig; print(sysconfig.get_paths()['purelib'])")
+PYTHON_PLATLIB := $(shell $(PYTHON) -c \
+	"import sysconfig; print(sysconfig.get_paths()['platlib'])")
+PYTHON_DISTLIB := $(shell $(PYTHON) -c \
+	"import sys, sysconfig; print(sysconfig.get_paths(vars={'py_version_short': sys.version_info[0]})['stdlib'])")/dist-packages
+
+ifeq ($(wildcard $(PYTHON_DISTLIB)/*),)
 	# Fedora/RedHat case
-	PYTHONDISTHOME := $(PYTHONPATH)/$(PYTHONLIBDIR)/$(PYTHONVERSION)/site-packages
+	PYTHON_DISTLIB := $(PYTHON_PURELIB)
 endif
 
-PYTHONEXEC := $(PYTHONPATH)/bin/$(PYTHONVERSION)
-PYTHONSHORTVERSION := $(subst python,,$(subst .,,$(PYTHONVERSION)))
-
-# Fedora/Redhat and Ubuntu use for example x86_64-linux-gnu
-PYTHON_ARCH_LONG := $(ARCH)-linux-gnu
+PYTHON_MULTIARCH := $(shell $(PYTHON) -c \
+	"import sys; print(sys.implementation._multiarch)")
+PYTHON_EXT_SUFFIX := $(shell $(PYTHON) -c \
+	"import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")

@@ -10,5 +10,11 @@ env.DOCKER_ARGS_SGX = '''
 '''
 env.WERROR = '1'
 env.MAKEOPTS = '-j8'
+
 env.PREFIX = env.WORKSPACE + '/prefix'
-env.PYTHONPATH = env.WORKSPACE + '/Scripts'
+env.PATH = env.PREFIX + '/usr/local/bin:' + env.PATH
+python_test_purelib = sh(returnStdout: true, script: '''python3 -c "
+import os, sysconfig
+print(sysconfig.get_paths(vars={'base': os.environ['PREFIX']})['purelib'][1:])
+"''').trim()
+env.PYTHONPATH = python_test_purelib + ':' + env.WORKSPACE + '/Scripts'

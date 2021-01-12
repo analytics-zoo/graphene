@@ -12,9 +12,9 @@ include ../../Scripts/Makefile.configs
 # Python constants are declared in Makefile.python
 include ../../Scripts/Makefile.python
 
-# Relative path to Graphene root
-GRAPHENEDIR ?= ../..
-SGX_SIGNER_KEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
+SGX_SIGNER_KEY ?= ../../Pal/src/host/Linux-SGX/signer/enclave-key.pem
+
+RUNTIMEDIR = $(PREFIX)/lib/graphene/sgx/runtime
 
 ifeq ($(DEBUG),1)
 GRAPHENEDEBUG = inline
@@ -23,7 +23,7 @@ GRAPHENEDEBUG = none
 endif
 
 .PHONY: all
-all: python.manifest pal_loader | python
+all: python.manifest | python
 ifeq ($(SGX),1)
 all: python.manifest.sgx python.token python.sig
 endif
@@ -41,30 +41,40 @@ endif
 GLIBC_DEPS = linux-vdso /lib64/ld-linux-x86-64 libc libm librt libdl libutil libpthread
 
 # Define the python libraries which are dynamically loaded.
-PY_LIBS = $(PYTHONHOME)/lib-dynload/_hashlib.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so \
-	  $(PYTHONHOME)/lib-dynload/_ctypes.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so \
-	  $(PYTHONHOME)/lib-dynload/_ssl.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so \
-	  $(PYTHONHOME)/lib-dynload/_bz2.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so \
-	  $(PYTHONHOME)/lib-dynload/_lzma.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so \
-	  $(PYTHONHOME)/lib-dynload/_json.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so
+PY_LIBS = \
+	$(PYTHON_STDLIB)/lib-dynload/_hashlib$(PYTHON_EXT_SUFFIX) \
+	$(PYTHON_STDLIB)/lib-dynload/_ctypes$(PYTHON_EXT_SUFFIX) \
+	$(PYTHON_STDLIB)/lib-dynload/_ssl$(PYTHON_EXT_SUFFIX) \
+	$(PYTHON_STDLIB)/lib-dynload/_bz2$(PYTHON_EXT_SUFFIX) \
+	$(PYTHON_STDLIB)/lib-dynload/_lzma$(PYTHON_EXT_SUFFIX) \
+	$(PYTHON_STDLIB)/lib-dynload/_json$(PYTHON_EXT_SUFFIX)
 
 ifeq ($(SGX),1)
-PY_LIBS += $(PYTHONDISTHOME)/apt_pkg.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so
+PY_LIBS += $(PYTHON_DISTLIB)/apt_pkg$(PYTHON_EXT_SUFFIX)
 endif
 
-PY_LIBS_TRUSTED_LIBS = "sgx.trusted_files.hashlib = \\\"file:$(PYTHONHOME)/lib-dynload/_hashlib.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so\\\"\\\\n" \
-	  "sgx.trusted_files.ctypes = \\\"file:$(PYTHONHOME)/lib-dynload/_ctypes.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so\\\"\\\\n" \
-	  "sgx.trusted_files.ssl = \\\"file:$(PYTHONHOME)/lib-dynload/_ssl.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so\\\"\\\\n" \
-	  "sgx.trusted_files.bz2 = \\\"file:$(PYTHONHOME)/lib-dynload/_bz2.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so\\\"\\\\n" \
-	  "sgx.trusted_files.lzma = \\\"file:$(PYTHONHOME)/lib-dynload/_lzma.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so\\\"\\\\n" \
-	  "sgx.trusted_files.json = \\\"file:$(PYTHONHOME)/lib-dynload/_json.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so\\\"\\\\n" \
-	  "sgx.trusted_files.aptpkg = \\\"file:$(PYTHONDISTHOME)/apt_pkg.cpython-$(PYTHONSHORTVERSION)m-$(PYTHON_ARCH_LONG).so\\\"\\\\n"
+define PY_LIBS_TRUSTED_LIBS
+sgx.trusted_files.hashlib = "file:$(PYTHON_STDLIB)/lib-dynload/_hashlib$(PYTHON_EXT_SUFFIX)"
+sgx.trusted_files.ctypes = "file:$(PYTHON_STDLIB)/lib-dynload/_ctypes$(PYTHON_EXT_SUFFIX)"
+sgx.trusted_files.ssl = "file:$(PYTHON_STDLIB)/lib-dynload/_ssl$(PYTHON_EXT_SUFFIX)"
+sgx.trusted_files.bz2 = "file:$(PYTHON_STDLIB)/lib-dynload/_bz2$(PYTHON_EXT_SUFFIX)"
+sgx.trusted_files.lzma = "file:$(PYTHON_STDLIB)/lib-dynload/_lzma$(PYTHON_EXT_SUFFIX)"
+sgx.trusted_files.json = "file:$(PYTHON_STDLIB)/lib-dynload/_json$(PYTHON_EXT_SUFFIX)"
+sgx.trusted_files.aptpkg = "file:$(PYTHON_DISTLIB)/apt_pkg$(PYTHON_EXT_SUFFIX)"
+
+endef
 
 ifeq ($(PYTHONSHORTVERSION),35)
-PYTHON_TRUSTED_SCRIPTS = "sgx.trusted_files.python21 = \\\"file:$(PYTHONHOME)/_sysconfigdata.py\\\"\\\\n" \
-	  "sgx.trusted_files.python22 = \\\"file:$(PYTHONHOME)/plat-$(PYTHON_ARCH_LONG)/_sysconfigdata_m.py\\\"\\\\n"
+define PYTHON_TRUSTED_SCRIPTS
+sgx.trusted_files.python21 = "file:$(PYTHON_STDLIB)/_sysconfigdata.py"
+sgx.trusted_files.python22 = "file:$(PYTHON_STDLIB)/plat-$(PYTHON_MULTIARCH)/_sysconfigdata_m.py"
+
+endef
 else
-PYTHON_TRUSTED_SCRIPTS = "sgx.trusted_files.python21 = \\\"file:$(PYTHONHOME)/_sysconfigdata_m_linux_$(PYTHON_ARCH_LONG).py\\\"\\\\n"
+define PYTHON_TRUSTED_SCRIPTS
+sgx.trusted_files.python21 = "file:$(PYTHON_STDLIB)/_sysconfigdata_m_linux_$(PYTHON_MULTIARCH).py"
+
+endef
 endif
 
 # Listing all the Python dependencies, besides Glibc libraries
@@ -79,52 +89,53 @@ python-deps: python-ldd
 
 # Generating manifest rules for Python dependencies
 .INTERMEDIATE: python-trusted-libs
+.ONESHELL:
 python-trusted-libs: python-deps
 	@PY_LIBS="$(PY_LIBS)" && \
 	for F in `cat python-deps`; do \
 		P=`ldd $$PY_LIBS | grep $$F | awk '{print $$3; exit}'`; \
 		N=`echo $$F | tr --delete '+-'`; \
-		echo -n "sgx.trusted_files.$$N = \\\"file:$$P\\\"\\\\n"; \
+		printf 'sgx.trusted_files.%s = "file:%s"\n' "$$N" "$$P"; \
 	done > $@
-	echo -n "$(PY_LIBS_TRUSTED_LIBS)" >> $@
+	printf %s '$(PY_LIBS_TRUSTED_LIBS)' >> $@
 
 .INTERMEDIATE: python-trusted-scripts
+.ONESHELL:
 python-trusted-scripts:
-	echo -n "$(PYTHON_TRUSTED_SCRIPTS)" >> $@
+	true
+	printf %s '$(PYTHON_TRUSTED_SCRIPTS)' >> $@
 
 python.manifest: python.manifest.template python-trusted-libs python-trusted-scripts
-	sed -e 's|$$(GRAPHENEDIR)|'"$(GRAPHENEDIR)"'|g' \
+	sed \
+		-e 's|$$(RUNTIMEDIR)|'"$(RUNTIMEDIR)"'|g' \
 		-e 's|$$(GRAPHENEDEBUG)|'"$(GRAPHENEDEBUG)"'|g' \
-		-e 's|$$(PYTHONDISTHOME)|'"$(PYTHONDISTHOME)"'|g' \
-		-e 's|$$(PYTHONHOME)|'"$(PYTHONHOME)"'|g' \
+		-e 's|$$(PYTHON_STDLIB)|'"$(PYTHON_STDLIB)"'|g' \
+		-e 's|$$(PYTHON_DISTLIB)|'"$(PYTHON_DISTLIB)"'|g' \
+		-e 's|$$(PYTHON_MULTIARCH)|'"$(PYTHON_MULTIARCH)"'|g' \
 		-e 's|$$(PYTHONEXEC)|'"$(PYTHONEXEC)"'|g' \
-		-e 's|$$(PYTHON_TRUSTED_SCRIPTS)|'"`cat python-trusted-scripts`"'|g' \
-		-e 's|$$(PYTHON_TRUSTED_LIBS)|'"`cat python-trusted-libs`"'|g' \
 		-e 's|$$(ARCH_LIBDIR)|'"$(ARCH_LIBDIR)"'|g' \
 		-e 's|$$(ARCH_LONG)|'"$(ARCH_LONG)"'|g' \
 		$< > $@
+	cat python-trusted-scripts python-trusted-libs >> $@
 
 # Python manifests for SGX:
 #   Generating the SGX-specific manifest (python.manifest.sgx), the enclave signature,
 #   and the token for enclave initialization.
 
 python.manifest.sgx: python.manifest
-	$(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/pal-sgx-sign \
+	graphene-sgx-sign \
 		-exec python \
-		-libpal $(GRAPHENEDIR)/Runtime/libpal-Linux-SGX.so \
+		-libpal $(RUNTIMEDIR)/libpal-Linux-SGX.so \
 		-key $(SGX_SIGNER_KEY) \
 		-manifest $< -output $@
 
 python.sig: python.manifest.sgx
 
 python.token: python.sig
-	$(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/pal-sgx-get-token -output $@ -sig $<
+	graphene-sgx-get-token -output $@ -sig $<
 
 python:
 	ln -s $(PYTHONEXEC) $@
-
-pal_loader:
-	ln -s $(GRAPHENEDIR)/Runtime/pal_loader $@
 
 .PHONY: check
 check: all
@@ -136,7 +147,7 @@ check: all
 
 .PHONY: clean
 clean:
-	$(RM) *.manifest *.manifest.sgx *.token *.sig python pal_loader OUTPUT* *.PID
+	$(RM) *.manifest *.manifest.sgx *.token *.sig python OUTPUT* *.PID
 	$(RM) -r scripts/__pycache__
 
 .PHONY: distclean
