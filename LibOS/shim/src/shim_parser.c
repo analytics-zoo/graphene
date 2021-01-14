@@ -121,10 +121,10 @@ struct parser_table {
                               .parser = {&parse_domain, &parse_socktype, NULL, &parse_pipe_fds}},
         [__NR_setsockopt]  = {.slow = 0, .parser = {NULL}},
         [__NR_getsockopt]  = {.slow = 0, .parser = {NULL}},
-        [__NR_clone]    = {.slow = 1, .parser = {&parse_clone_flags}},
-        [__NR_fork]     = {.slow = 1, .parser = {NULL}},
-        [__NR_vfork]    = {.slow = 1, .parser = {NULL}},
-        [__NR_execve]   = {.slow   = 1,
+        [__NR_clone]    = {.slow = 2, .parser = {&parse_clone_flags}},
+        [__NR_fork]     = {.slow = 2, .parser = {NULL}},
+        [__NR_vfork]    = {.slow = 2, .parser = {NULL}},
+        [__NR_execve]   = {.slow   = 2,
                            .parser = {NULL, &parse_exec_args, &parse_exec_envp}},
         [__NR_exit]     = {.slow = 0, .parser = {NULL}},
         [__NR_wait4]    = {.slow = 1, .parser = {NULL, NULL, &parse_wait_options, NULL}},
@@ -553,6 +553,8 @@ static inline void skip_syscall_args(va_list* ap) {
         va_arg(*ap, int);
 }
 
+static uint64_t init_time = 0;
+
 void parse_syscall_before(int sysno, const char* name, int nr, ...) {
     if (!g_debug_log_enabled)
         return;
@@ -565,7 +567,13 @@ void parse_syscall_before(int sysno, const char* name, int nr, ...) {
     va_list ap;
     va_start(ap, nr);
 
-    PRINTF("---- shim_%s(", name);
+    if(!init_time)
+	init_time = DkSystemTimeQuery()/1000;
+
+    if (parser->slow > 1 || parser->stop)
+        PRINTF("---- start time: %lu ms shim_%s(", DkSystemTimeQuery()/1000- init_time, name);
+    else
+        PRINTF("---- shim_%s(", name);
 
     for (int i = 0; i < nr; i++) {
         if (parser->stop && parser->stop == i)
@@ -600,8 +608,8 @@ void parse_syscall_after(int sysno, const char* name, int nr, ...) {
 
     const char* ret_type = va_arg(ap, const char*);
 
-    if (parser->slow || parser->stop)
-        PRINTF("---- return from shim_%s(...", name);
+    if (parser->slow > 1 || parser->stop)
+        PRINTF("---- end time: %lu ms return from shim_%s(...",  DkSystemTimeQuery()/1000 - init_time, name);
     else
         PRINTF("---- shim_%s(", name);
 

@@ -143,7 +143,7 @@ long shim_do_fcntl(int fd, int cmd, unsigned long arg) {
          *   EACCES or EAGAIN.
          */
         case F_SETLK:
-            ret = -ENOSYS;
+            ret = 0;
             break;
 
         /* F_SETLKW (struct flock *)
@@ -154,7 +154,7 @@ long shim_do_fcntl(int fd, int cmd, unsigned long arg) {
          *   set to EINTR; see signal(7)).
          */
         case F_SETLKW:
-            ret = -ENOSYS;
+            ret = 0;
             break;
 
         /* F_GETLK (struct flock *)
@@ -168,7 +168,7 @@ long shim_do_fcntl(int fd, int cmd, unsigned long arg) {
          *   the PID of the process holding that lock.
          */
         case F_GETLK:
-            ret = -ENOSYS;
+            ret =0;
             break;
 
         /* F_SETOWN (int)

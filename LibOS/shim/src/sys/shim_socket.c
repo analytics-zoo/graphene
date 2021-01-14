@@ -481,7 +481,7 @@ long shim_do_bind(int sockfd, struct sockaddr* addr, int _addrlen) {
 
     if (!pal_hdl) {
         ret = (PAL_NATIVE_ERRNO() == PAL_ERROR_STREAMEXIST) ? -EADDRINUSE : -PAL_ERRNO();
-        debug("bind: invalid handle returned\n");
+        debug("bind: invalid handle returned uri = %s\n", qstrgetstr(&hdl->uri));
         goto out;
     }
 

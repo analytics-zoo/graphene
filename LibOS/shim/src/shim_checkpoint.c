@@ -299,10 +299,14 @@ static int read_exact(PAL_HANDLE handle, void* buf, size_t size) {
     while (bytes < size) {
         PAL_NUM x = DkStreamRead(handle, 0, size - bytes, (char*)buf + bytes, NULL, 0);
         if (x == PAL_STREAM_ERROR) {
-            int err = PAL_ERRNO();
+               int err;//= PAL_ERRNO();
+                err = PAL_NATIVE_ERRNO();
+                debug("@@@@@@read_exact err = %d, handle = %p, buf = %p, size = %lu, bytes = %lu\n", err, handle, buf, size, bytes);
+                err = -convert_pal_errno(err);
             if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
                 continue;
             }
+	    debug("@@@@@@read_exact return %d\n", -err);
             return -err;
         }
 
@@ -318,10 +322,14 @@ static int write_exact(PAL_HANDLE handle, void* buf, size_t size) {
     while (bytes < size) {
         PAL_NUM x = DkStreamWrite(handle, 0, size - bytes, (char*)buf + bytes, NULL);
         if (x == PAL_STREAM_ERROR) {
-            int err = PAL_ERRNO();
+               int err;//= PAL_ERRNO();
+                err = PAL_NATIVE_ERRNO();
+                debug("@@@@@@write_exact err = %d, handle = %p, buf = %p, size = %lu, bytes = %lu\n", err, handle, buf, size, bytes);
+                err = -convert_pal_errno(err);
             if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
                 continue;
             }
+	    debug("@@@@@@write_exact return %d\n", -err);
             return -err;
         }
 

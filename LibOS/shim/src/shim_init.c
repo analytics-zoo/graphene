@@ -96,6 +96,7 @@ static int pal_errno_to_unix_errno[PAL_ERROR_NATIVE_COUNT + 1] = {
 };
 
 long convert_pal_errno(long err) {
+    debug("@@@@@pal_errno = %ld\n", err);
     return (err >= 0 && err <= PAL_ERROR_NATIVE_COUNT) ? pal_errno_to_unix_errno[err] : EACCES;
 }
 
