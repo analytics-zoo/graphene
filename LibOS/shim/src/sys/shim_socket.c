@@ -481,7 +481,7 @@ long shim_do_bind(int sockfd, struct sockaddr* addr, int _addrlen) {
 
     if (!pal_hdl) {
         ret = (PAL_NATIVE_ERRNO() == PAL_ERROR_STREAMEXIST) ? -EADDRINUSE : -PAL_ERRNO();
-        debug("bind: invalid handle returned\n");
+        debug("bind: invalid handle returned uri = %s\n", qstrgetstr(&hdl->uri));
         goto out;
     }
 
@@ -1238,14 +1238,19 @@ static ssize_t do_recvmsg(int fd, struct iovec* bufs, size_t nbufs, int flags,
         expected_size += bufs[i].iov_len;
     }
 
-    if (flags & ~(MSG_PEEK | MSG_DONTWAIT)) {
-        debug("recvmsg()/recvmmsg()/recvfrom(): unknown flag (only MSG_PEEK and MSG_DONTWAIT are"
-              " supported).\n");
+    if (flags & ~(MSG_PEEK | MSG_DONTWAIT | MSG_WAITALL)) {
+        debug("recvmsg()/recvmmsg()/recvfrom(): unknown flag (only MSG_PEEK, MSG_DONTWAIT and"
+              " MSG_WAITALL are supported).\n");
         ret = -EOPNOTSUPP;
         goto out;
     }
 
     lock(&hdl->lock);
+
+    if (flags & MSG_WAITALL) {
+            debug("Warning: MSG_WAITALL is ignored.\n");
+        flags &= ~MSG_WAITALL;
+    }
 
     if (flags & MSG_DONTWAIT) {
         if (!(hdl->flags & O_NONBLOCK)) {

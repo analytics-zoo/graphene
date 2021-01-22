@@ -1540,6 +1540,8 @@ static void print_syscall_name(const char* name, int sysno) {
     }
 }
 
+static uint64_t init_time = 0;
+
 void debug_print_syscall_before(int sysno, ...) {
     if (g_log_level < PAL_LOG_INFO)
         return;
@@ -1549,10 +1551,19 @@ void debug_print_syscall_before(int sysno, ...) {
     if (!parser->slow)
         return;
 
+    if (!strcmp(parser->name, "futex") || !strcmp(parser->name, "clock_gettime") || !strcmp(parser->name, "gettimeofday"))
+	return;
+
     va_list ap;
     va_start(ap, sysno);
 
     PUTS("---- ");
+
+    if(!init_time)
+        init_time = DkSystemTimeQuery()/1000;
+
+    PRINTF("---- start time: %lu ms ", DkSystemTimeQuery()/1000- init_time);
+
     print_syscall_name(parser->name, sysno);
     PUTS("(");
 
@@ -1578,6 +1589,9 @@ void debug_print_syscall_after(int sysno, ...) {
 
     struct parser_table* parser = &syscall_parser_table[sysno];
 
+    if (!strcmp(parser->name, "futex") || !strcmp(parser->name, "clock_gettime") || !strcmp(parser->name, "gettimeofday"))
+	return;
+
     va_list ap;
     va_start(ap, sysno);
 
@@ -1585,7 +1599,8 @@ void debug_print_syscall_after(int sysno, ...) {
     va_arg(ap, long);
 
     if (parser->slow) {
-        PUTS("---- return from ");
+	PRINTF("---- end time: %lu ms ",  DkSystemTimeQuery()/1000 - init_time);
+        PUTS("return from ");
         print_syscall_name(parser->name, sysno);
         PUTS("(...");
     } else {
