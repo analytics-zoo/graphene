@@ -1551,9 +1551,6 @@ void debug_print_syscall_before(int sysno, ...) {
     if (!parser->slow)
         return;
 
-    if (!strcmp(parser->name, "futex") || !strcmp(parser->name, "clock_gettime") || !strcmp(parser->name, "gettimeofday"))
-	return;
-
     va_list ap;
     va_start(ap, sysno);
 
@@ -1588,9 +1585,6 @@ void debug_print_syscall_after(int sysno, ...) {
         return;
 
     struct parser_table* parser = &syscall_parser_table[sysno];
-
-    if (!strcmp(parser->name, "futex") || !strcmp(parser->name, "clock_gettime") || !strcmp(parser->name, "gettimeofday"))
-	return;
 
     va_list ap;
     va_start(ap, sysno);
