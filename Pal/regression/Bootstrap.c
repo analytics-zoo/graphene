@@ -1,12 +1,5 @@
-#include <string.h>
-
 #include "pal.h"
-#include "pal_debug.h"
-
-static int test_data = 0;
-static int test_func(void) {
-    return 0;
-}
+#include "pal_regression.h"
 
 int main(int argc, char** argv, char** envp) {
     /* check if the program is loaded */
@@ -30,7 +23,11 @@ int main(int argc, char** argv, char** envp) {
 
     /* test debug stream */
     char* msg = "Written to Debug Stream\n";
-    DkDebugLog(msg, strlen(msg));
+    int ret = DkDebugLog(msg, strlen(msg));
+    if (ret < 0) {
+        pal_printf("Failed to write the debug message.\n");
+        return 1;
+    }
 
     /* Allocation Alignment */
     pal_printf("Allocation Alignment: %ld\n", pal_control.alloc_align);
@@ -42,17 +39,6 @@ int main(int argc, char** argv, char** envp) {
     if (pal_control.user_address.start && pal_control.user_address.end &&
         pal_control.user_address.start < pal_control.user_address.end)
         pal_printf("User Address Range OK\n");
-
-    /* executable address range */
-    pal_printf("Executable Range: %p - %p\n", pal_control.executable_range.start,
-               pal_control.executable_range.end);
-
-    if (pal_control.executable_range.start && pal_control.executable_range.end &&
-        pal_control.executable_range.start < (void*)&test_data &&
-        (void*)&test_data < pal_control.executable_range.end &&
-        pal_control.executable_range.start < (void*)&test_func &&
-        (void*)&test_func < pal_control.executable_range.end)
-        pal_printf("Executable Range OK\n");
 
     pal_printf("CPU num: %ld\n", pal_control.cpu_info.online_logical_cores);
     pal_printf("CPU vendor: %s\n", pal_control.cpu_info.cpu_vendor);

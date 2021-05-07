@@ -63,18 +63,11 @@ long shim_do_chdir(const char* filename) {
     if (strnlen(filename, MAX_PATH + 1) == MAX_PATH + 1)
         return -ENAMETOOLONG;
 
-    if ((ret = path_lookupat(NULL, filename, LOOKUP_OPEN, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(/*start=*/NULL, filename, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &dent)) < 0)
         return ret;
 
     if (!dent)
         return -ENOENT;
-
-    if (!(dent->state & DENTRY_ISDIRECTORY)) {
-        char buffer[dentry_get_path_size(dent)];
-        debug("%s is not a directory\n", dentry_get_path(dent, buffer));
-        put_dentry(dent);
-        return -ENOTDIR;
-    }
 
     lock(&g_process.fs_lock);
     put_dentry(g_process.cwd);
@@ -93,7 +86,7 @@ long shim_do_fchdir(int fd) {
 
     if (!(dent->state & DENTRY_ISDIRECTORY)) {
         char buffer[dentry_get_path_size(dent)];
-        debug("%s is not a directory\n", dentry_get_path(dent, buffer));
+        log_debug("%s is not a directory\n", dentry_get_path(dent, buffer));
         put_handle(hdl);
         return -ENOTDIR;
     }

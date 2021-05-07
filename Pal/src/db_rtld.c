@@ -23,6 +23,11 @@ struct link_map* g_exec_map = NULL;
 
 struct link_map* lookup_symbol(const char* undef_name, ElfW(Sym)** ref);
 
+/* err - positive or negative value of error code */
+static inline void print_error(const char* msg, int err) {
+    log_error("%s (%s)\n", msg, pal_strerror(err));
+}
+
 /* This macro is used as a callback from the ELF_DYNAMIC_RELOCATE code.  */
 static struct link_map* resolve_map(const char** strtab, ElfW(Sym)** ref) {
     if (ELFW(ST_BIND)((*ref)->st_info) != STB_LOCAL) {
@@ -250,14 +255,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
 #define APPEND_WRITECOPY(prot) ((prot) | PAL_PROT_WRITECOPY)
 
     if (e_type == ET_DYN) {
-        /* This is a position-independent shared object. Graphene allows
-         * libraries to be mapped anywhere in address space, but the
-         * executable must be mapped at the exact address. This is because
-         * Graphene copies libraries during fork but does not copy executable.
-         * We must enforce that executable segments are located at the same
-         * addresses across forks: simply use a predefined base address. */
-        void* mapaddr = type == OBJECT_EXEC ? DEFAULT_OBJECT_EXEC_ADDR : NULL;
-
+        void* mapaddr = NULL;
         ret = _DkStreamMap(handle, (void**)&mapaddr, APPEND_WRITECOPY(c->prot), c->mapoff,
                            maplength);
         if (ret < 0) {
@@ -411,7 +409,7 @@ void free_elf_object(struct link_map* map) {
         map->l_next->l_prev = map->l_prev;
 
 #ifdef DEBUG
-    _DkDebugDelMap(map);
+    _DkDebugMapRemove((void*)map->l_addr);
 #endif
 
     if (g_loaded_maps == map)
@@ -428,94 +426,22 @@ int load_elf_object(const char* uri, enum object_type type) {
     if (ret < 0)
         return ret;
 
-    ret = load_elf_object_by_handle(handle, type);
+    ret = load_elf_object_by_handle(handle, type, /*out_loading_base=*/NULL);
 
     _DkObjectClose(handle);
     return ret;
 }
 
-int add_elf_object(void* addr, PAL_HANDLE handle, int type) {
-    if (!addr)
-        return -PAL_ERROR_INVAL;
-
-    struct link_map* map = new_elf_object(_DkStreamRealpath(handle), type);
-    if (!map)
-        return -PAL_ERROR_NOMEM;
-
-    const ElfW(Ehdr)* header = (void*)addr;
-    const ElfW(Phdr)* ph;
-    const ElfW(Phdr)* phdr = (ElfW(Phdr)*)((char*)addr + header->e_phoff);
-
-    map->l_phdr  = (void*)header->e_phoff;
-    map->l_phnum = header->e_phnum;
-
-    ElfW(Addr) mapstart = ~0; /* start with the highest possible address */
-    ElfW(Addr) mapend   = 0;  /* start with the lowest possible address */
-
-    for (ph = phdr; ph < &phdr[map->l_phnum]; ph++)
-        switch (ph->p_type) {
-            case PT_DYNAMIC:
-                map->l_ld    = (void*)ph->p_vaddr;
-                map->l_ldnum = ph->p_memsz / sizeof(ElfW(Dyn));
-                break;
-            case PT_LOAD: {
-                ElfW(Addr) start = (ElfW(Addr))ALLOC_ALIGN_DOWN(map->l_addr + ph->p_vaddr);
-                ElfW(Addr) end =
-                    (ElfW(Addr))ALLOC_ALIGN_UP(map->l_addr + ph->p_vaddr + ph->p_memsz);
-                if (start < mapstart)
-                    mapstart = start;
-                if (end > mapend)
-                    mapend = end;
-            }
-        }
-
-    map->l_addr      = (ElfW(Addr))addr - mapstart;
-    map->l_entry     = header->e_entry;
-    map->l_map_start = (ElfW(Addr))addr;
-    map->l_map_end   = (ElfW(Addr))addr + (mapend - mapstart);
-
-    map->l_real_ld = (ElfW(Dyn)*)((char*)map->l_addr + (unsigned long)map->l_ld);
-    map->l_ld      = malloc_copy(map->l_real_ld, sizeof(ElfW(Dyn)) * map->l_ldnum);
-
-    elf_get_dynamic_info(map->l_ld, map->l_info, map->l_addr);
-    setup_elf_hash(map);
-    ELF_DYNAMIC_RELOCATE(map);
-
-    /* append to list (to preserve order of libs specified in
-     * manifest, e.g., loader.preload)
-     */
-    map->l_next = NULL;
-    if (!g_loaded_maps) {
-        map->l_prev = NULL;
-        g_loaded_maps = map;
-    } else {
-        struct link_map* end = g_loaded_maps;
-        while (end->l_next)
-            end = end->l_next;
-        end->l_next = map;
-        map->l_prev = end;
-    }
-
-    if (type == OBJECT_EXEC)
-        g_exec_map = map;
-
-#ifdef DEBUG
-    _DkDebugAddMap(map);
-#endif
-
-    return 0;
-}
-
 static int relocate_elf_object(struct link_map* l);
 
-int load_elf_object_by_handle(PAL_HANDLE handle, enum object_type type) {
+int load_elf_object_by_handle(PAL_HANDLE handle, enum object_type type, void** out_loading_base) {
     struct link_map* map = NULL;
     char fb[FILEBUF_SIZE];
     char* errstring;
     int ret = 0;
 
-    /* Now we will start verify the file as a ELF header. This part of code
-       is borrow from open_verify() */
+    /* Now we will start verify the file as a ELF header. This part of code was borrowed from
+     * open_verify(). */
     ElfW(Ehdr)* ehdr = (ElfW(Ehdr)*)&fb;
     ElfW(Phdr)* phdr = NULL;
     int phdr_malloced = 0;
@@ -605,9 +531,11 @@ int load_elf_object_by_handle(PAL_HANDLE handle, enum object_type type) {
         g_exec_map = map;
 
 #ifdef DEBUG
-    _DkDebugAddMap(map);
+    _DkDebugMapAdd(map->l_name, (void*)map->l_addr);
 #endif
 
+    if (out_loading_base)
+        *out_loading_base = (void*)map->l_map_start;
     return 0;
 
 verify_failed:
@@ -615,7 +543,7 @@ verify_failed:
     if (phdr && phdr_malloced)
         free(phdr);
 
-    printf("%s\n", errstring);
+    log_error("%s\n", errstring);
     return ret;
 }
 
@@ -877,78 +805,36 @@ static int relocate_elf_object(struct link_map* l) {
     return 0;
 }
 
-void DkDebugAttachBinary(PAL_STR uri, PAL_PTR start_addr) {
+/*
+ * TODO: This function assumes that a "file:" URI describes a path that can be opened on a host
+ * directly (e.g. by GDB or other tools). This is mostly true, except for protected files in
+ * Linux-SGX, which are stored encrypted. As a result, if we load a binary that is a protected file,
+ * we will (incorrectly) report the encrypted file as the actual binary, and code that tries to
+ * parse this file will trip up.
+ *
+ * For now, this doesn't seem worth fixing, as there's no use case for running binaries from
+ * protected files system, and a workaround would be ugly. Instead, the protected files system needs
+ * rethinking.
+ */
+void DkDebugMapAdd(PAL_STR uri, PAL_PTR start_addr) {
 #ifndef DEBUG
     __UNUSED(uri);
     __UNUSED(start_addr);
 #else
-    if (!strstartswith(uri, URI_PREFIX_FILE) || !start_addr)
+    if (!strstartswith(uri, URI_PREFIX_FILE))
         return;
 
     const char* realname = uri + URI_PREFIX_FILE_LEN;
-    struct link_map* l = new_elf_object(realname, OBJECT_EXTERNAL);
-    if (!l)
-        return;
 
-    /* This is the ELF header.  We read it in `open_verify'.  */
-    const ElfW(Ehdr)* header = (ElfW(Ehdr)*)start_addr;
-
-    l->l_entry     = header->e_entry;
-    l->l_phnum     = header->e_phnum;
-    l->l_map_start = (ElfW(Addr))start_addr;
-
-    ElfW(Phdr)* phdr = (void*)((char*)start_addr + header->e_phoff);
-    const ElfW(Phdr)* ph;
-    ElfW(Addr) map_start = 0, map_end = 0;
-
-    for (ph = phdr; ph < &phdr[l->l_phnum]; ++ph)
-        if (ph->p_type == PT_PHDR) {
-            if (!map_start || ph->p_vaddr < map_start)
-                map_start = ALLOC_ALIGN_DOWN(ph->p_vaddr);
-            if (!map_end || ph->p_vaddr + ph->p_memsz > map_end)
-                map_end = ALLOC_ALIGN_UP(ph->p_vaddr + ph->p_memsz);
-        }
-
-    l->l_addr    = l->l_map_start - map_start;
-    l->l_map_end = l->l_addr + map_end;
-
-    for (ph = phdr; ph < &phdr[l->l_phnum]; ++ph)
-        switch (ph->p_type) {
-            /* These entries tell us where to find things once the file's
-               segments are mapped in.  We record the addresses it says
-               verbatim, and later correct for the run-time load address.  */
-            case PT_DYNAMIC:
-                l->l_ld = l->l_real_ld = (ElfW(Dyn)*)((char*)l->l_addr + ph->p_vaddr);
-                l->l_ldnum = ph->p_memsz / sizeof(ElfW(Dyn));
-                break;
-
-            case PT_PHDR:
-                l->l_phdr = (ElfW(Phdr)*)((char*)l->l_addr + ph->p_vaddr);
-                break;
-
-            case PT_GNU_RELRO:
-                l->l_relro_addr = l->l_addr + ph->p_vaddr;
-                l->l_relro_size = ph->p_memsz;
-                break;
-        }
-
-    _DkDebugAddMap(l);
-    free(l);
+    _DkDebugMapAdd(realname, start_addr);
 #endif
 }
 
-void DkDebugDetachBinary(PAL_PTR start_addr) {
+void DkDebugMapRemove(PAL_PTR start_addr) {
 #ifndef DEBUG
     __UNUSED(start_addr);
 #else
-    for (struct link_map* l = g_loaded_maps; l; l = l->l_next)
-        if (l->l_map_start == (ElfW(Addr))start_addr) {
-            _DkDebugDelMap(l);
-
-            if (l->l_type == OBJECT_EXTERNAL)
-                free_elf_object(l);
-            break;
-        }
+    _DkDebugMapRemove(start_addr);
 #endif
 }
 
@@ -983,10 +869,6 @@ void* stack_before_call __attribute_unused = NULL;
 noreturn void start_execution(const char** arguments, const char** environs) {
     /* First we will try to run all the preloaded libraries which come with
        entry points */
-    if (g_exec_map) {
-        g_pal_control.executable_range.start = (PAL_PTR)ALLOC_ALIGN_DOWN(g_exec_map->l_map_start);
-        g_pal_control.executable_range.end   = (PAL_PTR)ALLOC_ALIGN_UP(g_exec_map->l_map_end);
-    }
 
     int narguments = 0;
     for (const char** a = arguments; *a; a++, narguments++)

@@ -15,8 +15,8 @@
 #include "shim_table.h"
 #include "shim_utils.h"
 
-ssize_t shim_do_readv(int fd, const struct iovec* vec, int vlen) {
-    if (!vec || test_user_memory((void*)vec, sizeof(*vec) * vlen, false))
+long shim_do_readv(int fd, const struct iovec* vec, int vlen) {
+    if (test_user_memory((void*)vec, sizeof(*vec) * vlen, false))
         return -EINVAL;
 
     for (int i = 0; i < vlen; i++) {
@@ -77,8 +77,8 @@ out:
  * actually written. Otherwise, it shall return a value of -1, the file-pointer
  * shall remain unchanged, and errno shall be set to indicate an error
  */
-ssize_t shim_do_writev(int fd, const struct iovec* vec, int vlen) {
-    if (!vec || test_user_memory((void*)vec, sizeof(*vec) * vlen, false))
+long shim_do_writev(int fd, const struct iovec* vec, int vlen) {
+    if (test_user_memory((void*)vec, sizeof(*vec) * vlen, false))
         return -EINVAL;
 
     for (int i = 0; i < vlen; i++) {

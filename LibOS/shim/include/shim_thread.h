@@ -45,8 +45,15 @@ struct shim_rt_signal_queue {
     struct shim_signal* queue[MAX_SIGNAL_LOG];
 };
 
+/*
+ * We store standard signals directly inside queue and real-time signals as pointers to objects
+ * obtained via `malloc`.
+ * `pending_mask` stores mask of signals present in this queue.
+ * Accesses to this queue should be protected by a lock.
+ */
 struct shim_signal_queue {
-    struct shim_signal* standard_signals[SIGRTMIN - 1];
+    __sigset_t pending_mask;
+    struct shim_signal standard_signals[SIGRTMIN - 1];
     struct shim_rt_signal_queue rt_signal_queues[NUM_SIGS - SIGRTMIN + 1];
 };
 
@@ -56,11 +63,19 @@ struct shim_thread {
     /* Field for inserting threads on global `g_thread_list`. */
     LIST_TYPE(shim_thread) list;
 
+    /* Pointer to the bottom of the internal LibOS stack. */
+    void* libos_stack_bottom;
+
     /* thread identifier */
     IDTYPE tid;
 
     /* credentials */
     IDTYPE uid, gid, euid, egid;
+
+    struct {
+        size_t count;
+        gid_t* groups;
+    } groups_info;
 
     /* thread pal handle */
     PAL_HANDLE pal_handle;
@@ -74,23 +89,21 @@ struct shim_thread {
 
     /* signal handling */
     __sigset_t signal_mask;
+    /* If you need both locks, take `thread->signal_dispositions->lock` before `thread->lock`. */
     struct shim_signal_dispositions* signal_dispositions;
     struct shim_signal_queue signal_queue;
     /* For the field below, see the explanation in "LibOS/shim/src/bookkeep/shim_signal.c" near
-     * `process_pending_signals_cnt`. */
+     * `g_process_pending_signals_cnt`. */
     uint64_t pending_signals;
 
     /*
-     * This field is used for checking whether we handled a signal (e.g. if we want to sleep and
-     * make some decision after wakeup based on whether we handled a signal, see `sigsuspend`)
-     * and can have following values:
-     * - `SIGNAL_NOT_HANDLED` - usually initialized to this - no signals were handled,
-     * - `SIGNAL_HANDLED` - at least one signal was handled,
-     * - `SIGNAL_HANDLED_RESTART` - same as above, but the signal had `SA_RESTART` flag.
-     * `SIGNAL_HANDLED` has priority over `SIGNAL_HANDLED_RESTART`, i.e. if we handle multiple
-     * signals, some with `SA_RESTART`, some without it, this field will be set to `SIGNAL_HANDLED`.
+     * Space to store a forced, synchronous signal. Needed to handle e.g. `SIGSEGV` caused by
+     * referencing an invalid address, which we need to handle before any user-generated `SIGSEGV`
+     * (via `kill`), hence we cannot use a normal signal queue in such case.
      */
-    unsigned char signal_handled;
+    struct shim_signal forced_signal;
+
+    /* This field can be accessed without any locks, but each thread can access only its own. */
     stack_t signal_altstack;
 
     /* futex robust list */
@@ -120,20 +133,13 @@ struct shim_thread_queue {
     bool in_use;
 };
 
-/* See the explanation in `shim_thread`. */
-enum {
-    SIGNAL_NOT_HANDLED = 0,
-    SIGNAL_HANDLED,
-    SIGNAL_HANDLED_RESTART,
-};
-
 int init_threading(void);
 
 static inline bool is_internal(struct shim_thread* thread) {
     return thread->tid >= INTERNAL_TID_BASE;
 }
 
-void clear_signal_queue(struct shim_signal_queue* queue);
+void free_signal_queue(struct shim_signal_queue* queue);
 
 void get_signal_dispositions(struct shim_signal_dispositions* dispositions);
 void put_signal_dispositions(struct shim_signal_dispositions* dispositions);
@@ -141,22 +147,7 @@ void put_signal_dispositions(struct shim_signal_dispositions* dispositions);
 void get_thread(struct shim_thread* thread);
 void put_thread(struct shim_thread* thread);
 
-void debug_setprefix(shim_tcb_t* tcb);
-
-/* Set `debug_buf` for `tcb`. If `debug_buf` is `NULL`, then new one is allocated. If `debug_buf`
- * is not NULL, this function cannot fail. */
-static inline int debug_setbuf(shim_tcb_t* tcb, struct debug_buf* debug_buf) {
-    if (!g_debug_log_enabled)
-        return 0;
-
-    tcb->debug_buf = debug_buf ? debug_buf : malloc(sizeof(struct debug_buf));
-    if (!tcb->debug_buf) {
-        return -ENOMEM;
-    }
-
-    debug_setprefix(tcb);
-    return 0;
-}
+void log_setprefix(shim_tcb_t* tcb);
 
 static inline struct shim_thread* get_cur_thread(void) {
     return SHIM_TCB_GET(tp);
@@ -185,10 +176,10 @@ static inline void set_cur_thread(struct shim_thread* thread) {
     }
 
     tcb->tp = thread;
+    tcb->libos_stack_bottom = thread->libos_stack_bottom;
     thread->shim_tcb = tcb;
 
-    if (tcb->debug_buf)
-        debug_setprefix(tcb);
+    log_setprefix(tcb);
 }
 
 static inline void thread_setwait(struct shim_thread** queue, struct shim_thread* thread) {
@@ -201,7 +192,7 @@ static inline void thread_setwait(struct shim_thread** queue, struct shim_thread
     }
 }
 
-static inline int thread_sleep(uint64_t timeout_us) {
+static inline int thread_sleep(uint64_t timeout_us, bool ignore_pending_signals) {
     struct shim_thread* cur_thread = get_cur_thread();
 
     if (!cur_thread)
@@ -211,13 +202,15 @@ static inline int thread_sleep(uint64_t timeout_us) {
     if (!event)
         return -EINVAL;
 
-    if (!DkSynchronizationObjectWait(event, timeout_us))
-        return -PAL_ERRNO();
+    if (!ignore_pending_signals && have_pending_signals()) {
+        return -EINTR;
+    }
 
-    return 0;
+    return pal_to_unix_errno(DkSynchronizationObjectWait(event, timeout_us));
 }
 
 static inline void thread_wakeup(struct shim_thread* thread) {
+    // TODO: handle errors
     DkEventSet(thread->scheduler_event);
 }
 
@@ -272,6 +265,16 @@ struct shim_thread* lookup_thread(IDTYPE tid);
 
 struct shim_thread* get_new_thread(void);
 struct shim_thread* get_new_internal_thread(void);
+
+/*!
+ * \brief Allocate a new stack for LibOS calls (emulated syscalls).
+ *
+ * \param thread Thread for which to allocate a new stack.
+ *
+ * On success returns `0`, on failure - negative error code.
+ * Should be called only once per thread.
+ */
+int alloc_thread_libos_stack(struct shim_thread* thread);
 
 /* Adds `thread` to global thread list. */
 void add_thread(struct shim_thread* thread);

@@ -61,7 +61,7 @@ static int pipe_session_key(PAL_PIPE_NAME* name, PAL_SESSION_KEY* session_key) {
 
     return 0;
 fail:
-    SGX_DBG(DBG_E, "Failed to derive the pre-shared key for pipe %s: %d\n", name->str, ret);
+    log_error("Failed to derive the pre-shared key for pipe %s: %d\n", name->str, ret);
     return ret;
 }
 
@@ -76,7 +76,7 @@ static int thread_handshake_func(void* param) {
     int ret = _DkStreamSecureInit(handle, handle->pipe.is_server, &handle->pipe.session_key,
                                   (LIB_SSL_CONTEXT**)&handle->pipe.ssl_ctx, NULL, 0);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Failed to initialize secure pipe %s: %d\n", handle->pipe.name.str, ret);
+        log_error("Failed to initialize secure pipe %s: %d\n", handle->pipe.name.str, ret);
         _DkProcessExit(1);
     }
 
@@ -103,7 +103,7 @@ static int pipe_listen(PAL_HANDLE* handle, const char* name, int options) {
 
     struct sockaddr_un addr;
     ret = pipe_addr(name, &addr);
-    if (IS_ERR(ret))
+    if (ret < 0)
         return -PAL_ERROR_DENIED;
 
     struct sockopt sock_options;
@@ -112,8 +112,8 @@ static int pipe_listen(PAL_HANDLE* handle, const char* name, int options) {
 
     ret = ocall_listen(AF_UNIX, SOCK_STREAM | nonblock, 0, /*ipv6_v6only=*/0,
                        (struct sockaddr*)&addr, &addrlen, &sock_options);
-    if (IS_ERR(ret))
-        return unix_to_pal_error(ERRNO(ret));
+    if (ret < 0)
+        return unix_to_pal_error(ret);
 
     PAL_HANDLE hdl = malloc(HANDLE_SIZE(pipe));
     if (!hdl) {
@@ -162,8 +162,8 @@ static int pipe_waitforclient(PAL_HANDLE handle, PAL_HANDLE* client) {
 
     struct sockopt sock_options;
     int ret = ocall_accept(handle->pipe.fd, NULL, NULL, &sock_options);
-    if (IS_ERR(ret))
-        return unix_to_pal_error(ERRNO(ret));
+    if (ret < 0)
+        return unix_to_pal_error(ret);
 
     PAL_HANDLE clnt = malloc(HANDLE_SIZE(pipe));
     if (!clnt) {
@@ -184,7 +184,7 @@ static int pipe_waitforclient(PAL_HANDLE handle, PAL_HANDLE* client) {
     clnt->pipe.handshake_done = 0;
 
     ret = pipe_session_key(&clnt->pipe.name, &clnt->pipe.session_key);
-    if (IS_ERR(ret)) {
+    if (ret < 0) {
         ocall_close(clnt->pipe.fd);
         free(clnt);
         return -PAL_ERROR_DENIED;
@@ -221,7 +221,7 @@ static int pipe_connect(PAL_HANDLE* handle, const char* name, int options) {
 
     struct sockaddr_un addr;
     ret = pipe_addr(name, &addr);
-    if (IS_ERR(ret))
+    if (ret < 0)
         return -PAL_ERROR_DENIED;
 
     struct sockopt sock_options;
@@ -230,8 +230,8 @@ static int pipe_connect(PAL_HANDLE* handle, const char* name, int options) {
 
     ret = ocall_connect(AF_UNIX, SOCK_STREAM | nonblock, 0, /*ipv6_v6only=*/0,
                         (const struct sockaddr*)&addr, addrlen, NULL, NULL, &sock_options);
-    if (IS_ERR(ret))
-        return unix_to_pal_error(ERRNO(ret));
+    if (ret < 0)
+        return unix_to_pal_error(ret);
 
     PAL_HANDLE hdl = malloc(HANDLE_SIZE(pipe));
     if (!hdl) {
@@ -250,7 +250,7 @@ static int pipe_connect(PAL_HANDLE* handle, const char* name, int options) {
 
     /* create the SSL pre-shared key for this end of the pipe and initialize SSL context */
     ret = pipe_session_key(&hdl->pipe.name, &hdl->pipe.session_key);
-    if (IS_ERR(ret)) {
+    if (ret < 0) {
         ocall_close(hdl->pipe.fd);
         free(hdl);
         return -PAL_ERROR_DENIED;
@@ -265,7 +265,7 @@ static int pipe_connect(PAL_HANDLE* handle, const char* name, int options) {
      * and assumes that client and server are two parallel entities (e.g., two threads) */
     PAL_HANDLE thread_hdl;
     ret = _DkThreadCreate(&thread_hdl, thread_handshake_func, /*param=*/hdl);
-    if (IS_ERR(ret)) {
+    if (ret < 0) {
         ocall_close(hdl->pipe.fd);
         free(hdl);
         return -PAL_ERROR_DENIED;
@@ -292,8 +292,8 @@ static int pipe_private(PAL_HANDLE* handle, int options) {
     int nonblock = options & PAL_OPTION_NONBLOCK ? SOCK_NONBLOCK : 0;
 
     int ret = ocall_socketpair(AF_UNIX, SOCK_STREAM | nonblock, 0, fds);
-    if (IS_ERR(ret))
-        return unix_to_pal_error(ERRNO(ret));
+    if (ret < 0)
+        return unix_to_pal_error(ret);
 
     PAL_HANDLE hdl = malloc(HANDLE_SIZE(pipeprv));
     if (!hdl) {
@@ -381,8 +381,8 @@ static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void*
     if (IS_HANDLE_TYPE(handle, pipeprv)) {
         /* pipeprv are currently not encrypted, see pipe_private() */
         bytes = ocall_recv(handle->pipeprv.fds[0], buffer, len, NULL, NULL, NULL, NULL);
-        if (IS_ERR(bytes))
-            return unix_to_pal_error(ERRNO(bytes));
+        if (bytes < 0)
+            return unix_to_pal_error(bytes);
     } else {
         /* normal pipe, use a secure session (should be already initialized) */
         while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE))
@@ -394,9 +394,6 @@ static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void*
         bytes = _DkStreamSecureRead(handle->pipe.ssl_ctx, buffer, len);
 	if (bytes < 0) SGX_DBG(DBG_E, "@@@@@@_DkStreamSecureRead returns %ld\n", bytes);
     }
-
-    if (!bytes)
-        return -PAL_ERROR_ENDOFSTREAM;
 
     return bytes;
 }
@@ -422,8 +419,8 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
     if (IS_HANDLE_TYPE(handle, pipeprv)) {
         /* pipeprv are currently not encrypted, see pipe_private() */
         bytes = ocall_send(handle->pipeprv.fds[1], buffer, len, NULL, 0, NULL, 0);
-        if (IS_ERR(bytes))
-            return unix_to_pal_error(ERRNO(bytes));
+        if (bytes < 0)
+            return unix_to_pal_error(bytes);
     } else {
         /* normal pipe, use a secure session (should be already initialized) */
         while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE))
@@ -541,8 +538,8 @@ static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     attr->pending_size = 0;
     if (!IS_HANDLE_TYPE(handle, pipesrv)) {
         ret = ocall_fionread(handle->pipe.fd);
-        if (IS_ERR(ret))
-            return unix_to_pal_error(ERRNO(ret));
+        if (ret < 0)
+            return unix_to_pal_error(ret);
 
         attr->pending_size = ret;
     }
@@ -553,8 +550,8 @@ static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
         struct pollfd pfd[2] = {{.fd = handle->pipeprv.fds[0], .events = POLLIN,  .revents = 0},
                                 {.fd = handle->pipeprv.fds[1], .events = POLLOUT, .revents = 0}};
         ret = ocall_poll(&pfd[0], 2, 0);
-        if (IS_ERR(ret))
-            return unix_to_pal_error(ERRNO(ret));
+        if (ret < 0)
+            return unix_to_pal_error(ret);
 
         attr->readable = ret >= 1 && (pfd[0].revents & (POLLIN | POLLERR | POLLHUP)) == POLLIN;
         attr->writable = ret >= 1 && (pfd[1].revents & (POLLOUT | POLLERR | POLLHUP)) == POLLOUT;
@@ -573,8 +570,8 @@ static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 
         struct pollfd pfd = {.fd = handle->pipe.fd, .events = pfd_events, .revents = 0};
         ret = ocall_poll(&pfd, 1, 0);
-        if (IS_ERR(ret))
-            return unix_to_pal_error(ERRNO(ret));
+        if (ret < 0)
+            return unix_to_pal_error(ret);
 
         attr->readable = ret == 1 && (pfd.revents & (POLLIN | POLLERR | POLLHUP)) == POLLIN;
         attr->writable = ret == 1 && (pfd.revents & (POLLOUT | POLLERR | POLLHUP)) == POLLOUT;
@@ -609,8 +606,8 @@ static int pipe_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 
     if (attr->nonblocking != *nonblocking) {
         int ret = ocall_fsetnonblock(handle->generic.fds[0], attr->nonblocking);
-        if (IS_ERR(ret))
-            return unix_to_pal_error(ERRNO(ret));
+        if (ret < 0)
+            return unix_to_pal_error(ret);
 
         *nonblocking = attr->nonblocking;
     }

@@ -29,11 +29,6 @@
         : "a"(ENTRY), "b"(ARGP), "d"(0)  \
         : "memory", "cc")
 
-#define CRASH_PROCESS()    \
-        __asm__ volatile(  \
-            "1: \n"        \
-            "ud2 \n"       \
-            "jmp 1b \n"    \
-        )
+#define SHIM_ELF_HOST_MACHINE EM_X86_64
 
 #endif /* _SHIM_INTERNAL_ARCH_H_ */

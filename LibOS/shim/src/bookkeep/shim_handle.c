@@ -38,7 +38,7 @@ static int init_tty_handle(struct shim_handle* hdl, bool write) {
     hdl->flags = write ? (O_WRONLY | O_APPEND) : O_RDONLY;
 
     struct shim_dentry* dent = NULL;
-    if ((ret = path_lookupat(NULL, "/dev/tty", LOOKUP_OPEN, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(/*start=*/NULL, "/dev/tty", LOOKUP_FOLLOW, &dent)) < 0)
         return ret;
 
     ret = dent->fs->d_ops->open(hdl, dent, hdl->flags);
@@ -52,30 +52,37 @@ static int init_tty_handle(struct shim_handle* hdl, bool write) {
 }
 
 static inline int init_exec_handle(void) {
-    if (!PAL_CB(executable))
+    if (!g_pal_control->executable)
         return 0;
+
+    lock(&g_process.fs_lock);
+    if (g_process.exec) {
+        // TODO: This is only a temporary workaround, which should be deleted after removing exec
+        // handling from PAL. `g_pal_control->executable` is valid only until first execve - in such
+        // case it's stale, and g_process.exec is already initialized by shim_do_execve_rtld.
+        unlock(&g_process.fs_lock);
+        return 0;
+    }
+    unlock(&g_process.fs_lock);
 
     struct shim_handle* exec = get_new_handle();
     if (!exec)
         return -ENOMEM;
 
-    qstrsetstr(&exec->uri, PAL_CB(executable), strlen(PAL_CB(executable)));
+    qstrsetstr(&exec->uri, g_pal_control->executable, strlen(g_pal_control->executable));
     exec->type     = TYPE_FILE;
     exec->flags    = O_RDONLY;
     exec->acc_mode = MAY_READ;
 
-    struct shim_mount* fs = find_mount_from_uri(PAL_CB(executable));
+    struct shim_mount* fs = find_mount_from_uri(g_pal_control->executable);
     if (fs) {
-        const char* p = PAL_CB(executable) + fs->uri.len;
-        /*
-         * Lookup for PAL_CB(executable) needs to be done under a given
-         * mount point. which requires a relative path name.
-         * On the other hand, the one in manifest file can be absolute path.
-         */
+        const char* p = g_pal_control->executable + fs->uri.len;
+        /* Lookup for `g_pal_control->executable` needs to be done under a given mount point which
+         * requires a relative path name. OTOH the one in manifest file can be absolute path. */
         while (*p == '/') {
             p++;
         }
-        path_lookupat(fs->root, p, 0, &exec->dentry, fs);
+        path_lookupat(fs->root, p, LOOKUP_FOLLOW, &exec->dentry);
         set_handle_fs(exec, fs);
         if (exec->dentry)
             dentry_get_path_into_qstr(exec->dentry, &exec->path);
@@ -388,7 +395,7 @@ void get_handle(struct shim_handle* hdl) {
 #ifdef DEBUG_REF
     int ref_count = REF_INC(hdl->ref_count);
 
-    debug("get handle %p(%s) (ref_count = %d)\n", hdl, __handle_name(hdl), ref_count);
+    log_debug("get handle %p(%s) (ref_count = %d)\n", hdl, __handle_name(hdl), ref_count);
 #else
     REF_INC(hdl->ref_count);
 #endif
@@ -404,13 +411,13 @@ void put_handle(struct shim_handle* hdl) {
     int ref_count = REF_DEC(hdl->ref_count);
 
 #ifdef DEBUG_REF
-    debug("put handle %p(%s) (ref_count = %d)\n", hdl, __handle_name(hdl), ref_count);
+    log_debug("put handle %p(%s) (ref_count = %d)\n", hdl, __handle_name(hdl), ref_count);
 #endif
 
     if (!ref_count) {
         delete_from_epoll_handles(hdl);
 
-        if (hdl->type == TYPE_DIR) {
+        if (hdl->is_dir) {
             struct shim_dir_handle* dir = &hdl->dir_info;
 
             if (dir->dot) {
@@ -430,14 +437,14 @@ void put_handle(struct shim_handle* hdl) {
                     *(dir->ptr++) = NULL;
                 }
             }
-        } else {
-            if (hdl->fs && hdl->fs->fs_ops && hdl->fs->fs_ops->close)
-                hdl->fs->fs_ops->close(hdl);
+        }
 
-            if (hdl->type == TYPE_SOCK && hdl->info.sock.peek_buffer) {
-                free(hdl->info.sock.peek_buffer);
-                hdl->info.sock.peek_buffer = NULL;
-            }
+        if (hdl->fs && hdl->fs->fs_ops && hdl->fs->fs_ops->close)
+            hdl->fs->fs_ops->close(hdl);
+
+        if (hdl->type == TYPE_SOCK && hdl->info.sock.peek_buffer) {
+            free(hdl->info.sock.peek_buffer);
+            hdl->info.sock.peek_buffer = NULL;
         }
 
         if (hdl->fs && hdl->fs->fs_ops && hdl->fs->fs_ops->hput)
@@ -448,14 +455,14 @@ void put_handle(struct shim_handle* hdl) {
 
         if (hdl->pal_handle) {
 #ifdef DEBUG_REF
-            debug("handle %p closes PAL handle %p\n", hdl, hdl->pal_handle);
+            log_debug("handle %p closes PAL handle %p\n", hdl, hdl->pal_handle);
 #endif
-            DkObjectClose(hdl->pal_handle);
+            DkObjectClose(hdl->pal_handle); // TODO: handle errors
             hdl->pal_handle = NULL;
         }
 
         if (hdl->dentry)
-            put_dentry_maybe_delete(hdl->dentry);
+            put_dentry(hdl->dentry);
 
         if (hdl->fs)
             put_mount(hdl->fs);
@@ -464,21 +471,33 @@ void put_handle(struct shim_handle* hdl) {
     }
 }
 
-off_t get_file_size(struct shim_handle* hdl) {
+int get_file_size(struct shim_handle* hdl, uint64_t* size) {
     if (!hdl->fs || !hdl->fs->fs_ops)
         return -EINVAL;
 
-    if (hdl->fs->fs_ops->poll)
-        return hdl->fs->fs_ops->poll(hdl, FS_POLL_SZ);
+    if (hdl->fs->fs_ops->poll) {
+        off_t x = hdl->fs->fs_ops->poll(hdl, FS_POLL_SZ);
+        if (x < 0) {
+            return -EINVAL;
+        }
+        *size = (uint64_t)x;
+        return 0;
+    }
 
     if (hdl->fs->fs_ops->hstat) {
         struct stat stat;
         int ret = hdl->fs->fs_ops->hstat(hdl, &stat);
-        if (ret < 0)
+        if (ret < 0) {
             return ret;
-        return stat.st_size;
+        }
+        if (stat.st_size < 0) {
+            return -EINVAL;
+        }
+        *size = (uint64_t)stat.st_size;
+        return 0;
     }
 
+    *size = 0;
     return 0;
 }
 

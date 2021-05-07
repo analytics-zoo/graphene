@@ -20,13 +20,13 @@ long shim_do_stat(const char* file, struct stat* stat) {
     if (!file || test_user_string(file))
         return -EFAULT;
 
-    if (!stat || test_user_memory(stat, sizeof(*stat), true))
+    if (test_user_memory(stat, sizeof(*stat), true))
         return -EFAULT;
 
     int ret;
     struct shim_dentry* dent = NULL;
 
-    if ((ret = path_lookupat(NULL, file, LOOKUP_ACCESS | LOOKUP_FOLLOW, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(/*start=*/NULL, file, LOOKUP_FOLLOW, &dent)) < 0)
         goto out;
 
     struct shim_mount* fs = dent->fs;
@@ -47,13 +47,13 @@ long shim_do_lstat(const char* file, struct stat* stat) {
     if (!file || test_user_string(file))
         return -EFAULT;
 
-    if (!stat || test_user_memory(stat, sizeof(*stat), true))
+    if (test_user_memory(stat, sizeof(*stat), true))
         return -EFAULT;
 
     int ret;
     struct shim_dentry* dent = NULL;
 
-    if ((ret = path_lookupat(NULL, file, LOOKUP_ACCESS, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(/*start=*/NULL, file, LOOKUP_NO_FOLLOW, &dent)) < 0)
         goto out;
 
     struct shim_mount* fs = dent->fs;
@@ -109,7 +109,7 @@ long shim_do_readlinkat(int dirfd, const char* file, char* buf, int bufsize) {
 
     struct shim_qstr qstr = QSTR_INIT;
 
-    if ((ret = path_lookupat(dir, file, LOOKUP_ACCESS, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(dir, file, LOOKUP_NO_FOLLOW, &dent)) < 0)
         goto out;
 
     ret = -EINVAL;
@@ -146,7 +146,7 @@ long shim_do_readlink(const char* file, char* buf, int bufsize) {
 
 static int __do_statfs(struct shim_mount* fs, struct statfs* buf) {
     __UNUSED(fs);
-    if (!buf || test_user_memory(buf, sizeof(*buf), true))
+    if (test_user_memory(buf, sizeof(*buf), true))
         return -EFAULT;
 
     memset(buf, 0, sizeof(*buf));
@@ -156,7 +156,7 @@ static int __do_statfs(struct shim_mount* fs, struct statfs* buf) {
     buf->f_bfree  = 10000000;
     buf->f_bavail = 10000000;
 
-    debug("statfs: %ld %ld %ld\n", buf->f_blocks, buf->f_bfree, buf->f_bavail);
+    log_debug("statfs: %ld %ld %ld\n", buf->f_blocks, buf->f_bfree, buf->f_bavail);
 
     return 0;
 }
@@ -168,7 +168,7 @@ long shim_do_statfs(const char* path, struct statfs* buf) {
     int ret;
     struct shim_dentry* dent = NULL;
 
-    if ((ret = path_lookupat(NULL, path, LOOKUP_ACCESS | LOOKUP_FOLLOW, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(/*start=*/NULL, path, LOOKUP_FOLLOW, &dent)) < 0)
         return ret;
 
     struct shim_mount* fs = dent->fs;
@@ -194,12 +194,12 @@ long shim_do_newfstatat(int dirfd, const char* pathname, struct stat* statbuf, i
     if (test_user_memory(statbuf, sizeof(*statbuf), true))
         return -EFAULT;
 
-    int lookup_flags = LOOKUP_ACCESS | LOOKUP_FOLLOW;
+    int lookup_flags = LOOKUP_FOLLOW;
     if (flags & AT_SYMLINK_NOFOLLOW)
         lookup_flags &= ~LOOKUP_FOLLOW;
     if (flags & AT_NO_AUTOMOUNT) {
         /* Do nothing as automount isn't supported */
-        debug("ignoring AT_NO_AUTOMOUNT.");
+        log_warning("newfstatat: ignoring AT_NO_AUTOMOUNT.");
     }
 
     int ret = 0;
@@ -234,7 +234,7 @@ long shim_do_newfstatat(int dirfd, const char* pathname, struct stat* statbuf, i
     }
 
     struct shim_dentry* dent = NULL;
-    ret = path_lookupat(dir, pathname, lookup_flags, &dent, NULL);
+    ret = path_lookupat(dir, pathname, lookup_flags, &dent);
     if (ret >= 0) {
         struct shim_d_ops* d_ops = dent->fs->d_ops;
         if (d_ops && d_ops->stat)

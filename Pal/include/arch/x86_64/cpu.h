@@ -5,6 +5,9 @@
 
 #include <stdint.h>
 
+#define PAGE_SIZE       (1 << 12)
+#define PRESET_PAGESIZE PAGE_SIZE
+
 enum PAL_CPUID_WORD {
     PAL_CPUID_WORD_EAX = 0,
     PAL_CPUID_WORD_EBX = 1,
@@ -64,6 +67,14 @@ static inline void wrfsbase(uint64_t addr) {
         :: "D"(addr) : "memory");
 }
 
+static inline noreturn void die_or_inf_loop(void) {
+    __asm__ volatile (
+        "1: \n"
+        "ud2 \n"
+        "jmp 1b \n"
+    );
+    __builtin_unreachable();
+}
 
 #define CPU_RELAX() __asm__ volatile("pause")
 

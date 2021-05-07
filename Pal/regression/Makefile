@@ -1,8 +1,8 @@
 include ../../Scripts/Makefile.configs
 include ../../Scripts/Makefile.rules
 
-CFLAGS	+= -Wp,-U_FORTIFY_SOURCE -fno-stack-protector -fno-builtin -nostdlib \
-	  -I../src \
+CFLAGS	+= -fno-stack-protector -fno-builtin -nostdlib \
+	  -I. \
 	  -I../include \
 	  -I../include/pal \
 	  -I../include/lib \
@@ -28,9 +28,7 @@ executables = \
 	Bootstrap7 \
 	Directory \
 	Event \
-	Event2 \
 	Exit \
-	Failure \
 	File \
 	File2 \
 	HelloWorld \
@@ -57,68 +55,62 @@ executables = \
 	normalize_path \
 	$(executables-$(ARCH))
 
-manifests = \
-	manifest \
+repo_manifests = \
 	Bootstrap3.manifest \
 	Bootstrap6.manifest \
 	Bootstrap7.manifest \
 	File.manifest \
-	Process.manifest \
-	Process2.manifest \
 	Process3.manifest \
-	SendHandle.manifest \
 	Thread2.manifest \
 	Thread2_exitless.manifest
 
-target = \
-	Bootstrap6 \
-	Thread2_exitless \
-	$(executables) \
-	$(manifests)
+# Empty rule to prevent overriding them using "%.manifest: manifest.template" rule.
+$(repo_manifests): ;
 
-include ../../Scripts/Makefile.manifest
+gen_manifests = $(filter-out $(repo_manifests),$(addsuffix .manifest,$(executables)))
+all_manifests = $(repo_manifests) $(gen_manifests)
+
+target = \
+	$(executables) \
+	$(all_manifests)
+
+include ../../Scripts/manifest.mk
 graphene_lib = .lib/graphene-lib.a
-pal_lib = ../../Runtime/libpal-$(PAL_HOST).so
+pal_lib ?= ../../Runtime/libpal-$(PAL_HOST).so
 
 RUNTIME_DIR = $(CURDIR)/../../Runtime
 
 .PHONY: all
-all: $(target) $(call expand_target_to_sig,$(target)) $(call expand_target_to_sgx,$(target)) $(preloads)
+all: $(target) $(call expand_target_to_sig,$(target)) \
+     $(call expand_target_to_sgx,$(target)) $(preloads)
 
 .PHONY: sgx-tokens
 sgx-tokens: $(call expand_target_to_token,$(target))
 
 .PHONY: crt_init-recurse
 crt_init-recurse:
-	$(MAKE) -C ../crt_init all
+	$(MAKE) -C crt_init all
 
-../crt_init/user_shared_start.o ../crt_init/user_start.o: crt_init-recurse
+crt_init/user_shared_start.o crt_init/user_start.o: crt_init-recurse
 	@true
 
 CFLAGS-Pie = -fPIC -pie
 CFLAGS-AttestationReport = -I../src/host/Linux-SGX
+
+abort.o: CFLAGS += -fPIC
 
 # workaround: File.manifest.template has strange reference
 # to ../regression/File
 ../regression/File: | File
 	@true
 
-LDLIBS-preloads = ../crt_init/user_shared_start.o $(graphene_lib) $(pal_lib)
+LDLIBS-preloads = crt_init/user_shared_start.o abort.o $(graphene_lib) $(pal_lib)
 $(preloads): %.so: %.c $(LDLIBS-preloads)
 	$(call cmd,csingle) -shared -fPIC $(LDLIBS-preloads)
 
-LDLIBS-executables = ../crt_init/user_start.o $(graphene_lib) $(pal_lib) $(preloads)
+LDLIBS-executables = crt_init/user_start.o abort.o $(graphene_lib) $(pal_lib) $(preloads)
 $(executables): %: %.c $(LDLIBS-executables)
 	$(call cmd,csingle) -no-pie $(LDLIBS-executables)
-
-# Handle multiple tests which share one binary (Graphene requires 1-1 manifest-executable
-# correspondence).
-
-Bootstrap6: Bootstrap
-	$(call cmd,ln_sfr)
-
-Thread2_exitless: Thread2
-	$(call cmd,ln_sfr)
 
 ifeq ($(filter %clean,$(MAKECMDGOALS)),)
 include $(wildcard *.d)
@@ -137,7 +129,28 @@ pal-regression.xml: test_pal.py $(target) $(call expand_target_to_sig,$(target))
 
 .PHONY: clean
 clean:
-	$(RM) -r $(target) $(preloads) *.tmp .lib *.cached *.sig .*.sig *.d .*.d .output.* *.token .*.token *.manifest.sgx .*.manifest.sgx __pycache__ .cache pal-regression.xml
+	$(MAKE) -C crt_init $@
+	$(RM) -r \
+		$(executables) \
+		$(gen_manifests) \
+		$(preloads) \
+		*.cached \
+		*.d \
+		.*.d \
+		*.manifest.sgx \
+		.*.manifest.sgx \
+		*.o \
+		*.sig \
+		.*.sig \
+		*.tmp \
+		*.token \
+		.*.token \
+		.cache \
+		.lib \
+		.output.* \
+		.pytest_cache \
+		__pycache__ \
+		pal-regression.xml
 
 .PHONY: distclean
 distclean: clean

@@ -33,23 +33,28 @@
 static_assert(sizeof(shim_tcb_t) <= PAL_LIBOS_TCB_SIZE,
               "shim_tcb_t does not fit into PAL_TCB; please increase PAL_LIBOS_TCB_SIZE");
 
-size_t g_pal_alloc_align;
+const toml_table_t* g_manifest_root = NULL;
+const PAL_CONTROL* g_pal_control = NULL;
 
-toml_table_t* g_manifest_root = NULL;
+/* TODO: Currently copied from log_always(). Ideally, LibOS's implementation of warn() should call a
+ *       va_list version of log_always(). */
+static int buf_write_all(const char* str, size_t size, void* arg) {
+    __UNUSED(arg);
+    DkDebugLog((PAL_PTR)str, size);
+    return 0;
+}
 
-/* The following constants will help matching glibc version with compatible
-   SHIM libraries */
-#include "glibc-version.h"
+void warn(const char* format, ...) {
+    struct print_buf buf = INIT_PRINT_BUF(buf_write_all);
 
-const unsigned int glibc_version = GLIBC_VERSION;
+    buf_puts(&buf, shim_get_tcb()->log_prefix);
 
-static void handle_failure(PAL_NUM arg, PAL_CONTEXT* context) {
-    __UNUSED(context);
-    if ((arg <= PAL_ERROR_NATIVE_COUNT) ||
-            (arg >= PAL_ERROR_CRYPTO_START && arg <= PAL_ERROR_CRYPTO_END))
-        shim_get_tcb()->pal_errno = arg;
-    else
-        shim_get_tcb()->pal_errno = PAL_ERROR_DENIED;
+    va_list ap;
+    va_start(ap, format);
+    buf_vprintf(&buf, format, ap);
+    va_end(ap);
+
+    buf_flush(&buf);
 }
 
 noreturn void __abort(void) {
@@ -58,14 +63,7 @@ noreturn void __abort(void) {
     DkProcessExit(1);
 }
 
-/* we use GCC's stack protector; when it detects corrupted stack, it calls __stack_chk_fail() */
-noreturn void __stack_chk_fail(void); /* to suppress GCC's warning "no previous prototype" */
-noreturn void __stack_chk_fail(void) {
-    debug("Stack protector: Graphene LibOS internal stack corruption detected\n");
-    __abort();
-}
-
-static int pal_errno_to_unix_errno[PAL_ERROR_NATIVE_COUNT + 1] = {
+static unsigned pal_errno_to_unix_errno_table[PAL_ERROR_NATIVE_COUNT + 1] = {
     [PAL_ERROR_SUCCESS]         = 0,
     [PAL_ERROR_NOTIMPLEMENTED]  = ENOSYS,
     [PAL_ERROR_NOTDEFINED]      = ENOSYS,
@@ -83,10 +81,8 @@ static int pal_errno_to_unix_errno[PAL_ERROR_NATIVE_COUNT + 1] = {
     [PAL_ERROR_OVERFLOW]        = EFAULT,
     [PAL_ERROR_BADADDR]         = EFAULT,
     [PAL_ERROR_NOMEM]           = ENOMEM,
-    [PAL_ERROR_NOTKILLABLE]     = EACCES,
     [PAL_ERROR_INCONSIST]       = EFAULT,
     [PAL_ERROR_TRYAGAIN]        = EAGAIN,
-    [PAL_ERROR_ENDOFSTREAM]     = 0,
     [PAL_ERROR_NOTSERVER]       = EINVAL,
     [PAL_ERROR_NOTCONNECTION]   = ENOTCONN,
     [PAL_ERROR_CONNFAILED]      = ECONNRESET,
@@ -95,15 +91,20 @@ static int pal_errno_to_unix_errno[PAL_ERROR_NATIVE_COUNT + 1] = {
     [PAL_ERROR_CONNFAILED_PIPE] = EPIPE,
 };
 
-long convert_pal_errno(long err) {
-    debug("@@@@@pal_errno = %ld\n", err);
-    return (err >= 0 && err <= PAL_ERROR_NATIVE_COUNT) ? pal_errno_to_unix_errno[err] : EACCES;
+static unsigned long pal_to_unix_errno_positive(unsigned long err) {
+    return (err <= PAL_ERROR_NATIVE_COUNT) ? pal_errno_to_unix_errno_table[err] : EINVAL;
+}
+
+long pal_to_unix_errno(long err) {
+    if (err >= 0) {
+        return pal_to_unix_errno_positive((unsigned long)err);
+    }
+    return -pal_to_unix_errno_positive((unsigned long)-err);
 }
 
 void* migrated_memory_start;
 void* migrated_memory_end;
 
-const char** migrated_argv __attribute_migratable;
 const char** migrated_envp __attribute_migratable;
 
 /* library_paths is populated with LD_PRELOAD entries once during LibOS
@@ -121,41 +122,59 @@ void* allocate_stack(size_t size, size_t protect_size, bool user) {
     size = ALLOC_ALIGN_UP(size);
     protect_size = ALLOC_ALIGN_UP(protect_size);
 
-    int flags = MAP_PRIVATE | MAP_ANONYMOUS | (user ? 0 : VMA_INTERNAL) | MAP_GROWSDOWN;
+    log_debug("Allocating stack at %p (size = %ld)\n", stack, size);
 
-    if (user) {
-        /* reserve non-readable non-writable page below the user stack to catch stack overflows */
-        int ret = bkeep_mmap_any_aslr(size + protect_size, PROT_NONE, flags, NULL, 0, "stack",
-                                      &stack);
-        if (ret < 0) {
-            return NULL;
-        }
-
-        if (!DkVirtualMemoryAlloc(stack, size + protect_size, 0, PAL_PROT_NONE)) {
-            void* tmp_vma = NULL;
-            if (bkeep_munmap(stack, size + protect_size, !user, &tmp_vma) < 0) {
-                BUG();
-            }
-            bkeep_remove_tmp_vma(tmp_vma);
-            return NULL;
-        }
-    } else {
+    if (!user) {
         stack = system_malloc(size + protect_size);
         if (!stack) {
             return NULL;
         }
+        stack += protect_size;
+        stack = ALIGN_UP_PTR(stack, 16);
+        return stack;
     }
 
-    stack += protect_size;
-    /* ensure proper alignment for process' initial stack */
-    stack = ALIGN_UP_PTR(stack, 16);
-    DkVirtualMemoryProtect(stack, size, PAL_PROT_READ | PAL_PROT_WRITE);
-
-    if (bkeep_mprotect(stack, size, PROT_READ | PROT_WRITE, !!(flags & VMA_INTERNAL)) < 0)
+    /* reserve non-readable non-writable page below the user stack to catch stack overflows */
+    int ret = bkeep_mmap_any_aslr(size + protect_size, PROT_NONE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, NULL, 0, "stack",
+                                  &stack);
+    if (ret < 0) {
         return NULL;
+    }
 
-    debug("Allocated stack at %p (size = %ld)\n", stack, size);
-    return stack;
+    bool need_mem_free = false;
+    ret = DkVirtualMemoryAlloc(&stack, size + protect_size, 0, PAL_PROT_NONE);
+    if (ret < 0) {
+        goto out_fail;
+    }
+    need_mem_free = true;
+
+    /* ensure proper alignment for process' initial stack */
+    assert(IS_ALIGNED_PTR(stack, 16));
+
+    if (bkeep_mprotect(stack + protect_size, size, PROT_READ | PROT_WRITE,
+                       /*is_internal=*/false) < 0) {
+        goto out_fail;
+    }
+
+    if (DkVirtualMemoryProtect(stack + protect_size, size, PAL_PROT_READ | PAL_PROT_WRITE) < 0) {
+        goto out_fail;
+    }
+
+    return stack + protect_size;
+
+out_fail:;
+    void* tmp_vma = NULL;
+    if (bkeep_munmap(stack, size + protect_size, /*is_internal=*/false, &tmp_vma) < 0) {
+        BUG();
+    }
+    if (need_mem_free) {
+        if (DkVirtualMemoryFree(stack, size + protect_size) < 0) {
+            BUG();
+        }
+    }
+    bkeep_remove_tmp_vma(tmp_vma);
+    return NULL;
 }
 
 /* populate already-allocated stack with copied argv and envp and space for auxv;
@@ -271,6 +290,7 @@ static int populate_stack(void* stack, size_t stack_size, const char** argv, con
     /* clear working area at the bottom */
     memset(stack, 0, shift);
 
+    /* TODO: remove this, but see the comment in `shim_do_execve`. */
     /* set global envp pointer for future checkpoint/migration: this is required for fork/clone
      * case (so that migrated envp points to envvars on the migrated stack) and redundant for
      * execve case (because execve passes an explicit list of envvars to child process) */
@@ -290,7 +310,7 @@ int init_stack(const char** argv, const char** envp, const char*** out_argp,
     ret = toml_sizestring_in(g_manifest_root, "sys.stack.size", get_rlimit_cur(RLIMIT_STACK),
                              &stack_size);
     if (ret < 0) {
-        debug("Cannot parse \'sys.stack.size\' (the value must be put in double quotes!)\n");
+        log_error("Cannot parse \'sys.stack.size\' (the value must be put in double quotes!)\n");
         return -EINVAL;
     }
 
@@ -301,12 +321,11 @@ int init_stack(const char** argv, const char** envp, const char*** out_argp,
     if (!cur_thread || cur_thread->stack)
         return 0;
 
-    void* stack = allocate_stack(stack_size, g_pal_alloc_align, /*user=*/true);
+    void* stack = allocate_stack(stack_size, ALLOC_ALIGNMENT, /*user=*/true);
     if (!stack)
         return -ENOMEM;
 
-    /* if there are argv/envp inherited from parent, use them */
-    argv = migrated_argv ?: argv;
+    /* if there is envp inherited from parent, use it */
     envp = migrated_envp ?: envp;
 
     ret = populate_stack(stack, stack_size, argv, envp, out_argp, out_auxv);
@@ -315,7 +334,7 @@ int init_stack(const char** argv, const char** envp, const char*** out_argp,
 
     cur_thread->stack_top = stack + stack_size;
     cur_thread->stack     = stack;
-    cur_thread->stack_red = stack - g_pal_alloc_align;
+    cur_thread->stack_red = stack - ALLOC_ALIGNMENT;
     return 0;
 }
 
@@ -361,44 +380,40 @@ static int read_environs(const char** envp) {
 
 #define CALL_INIT(func, args...) func(args)
 
-#define RUN_INIT(func, ...)                                              \
-    do {                                                                 \
-        int _err = CALL_INIT(func, ##__VA_ARGS__);                       \
-        if (_err < 0) {                                                  \
-            debug("Error during shim_init() in " #func " (%d)\n", _err); \
-            DkProcessExit(_err);                                         \
-        }                                                                \
+#define RUN_INIT(func, ...)                                                  \
+    do {                                                                     \
+        int _err = CALL_INIT(func, ##__VA_ARGS__);                           \
+        if (_err < 0) {                                                      \
+            log_error("Error during shim_init() in " #func " (%d)\n", _err); \
+            DkProcessExit(-_err);                                            \
+        }                                                                    \
     } while (0)
 
 noreturn void* shim_init(int argc, void* args) {
-    g_debug_log_enabled = PAL_CB(enable_debug_log);
-    g_process_ipc_info.vmid = (IDTYPE)PAL_CB(process_id);
+    g_pal_control = DkGetPalControl();
+    assert(g_pal_control);
+
+    g_log_level = g_pal_control->log_level;
+    g_process_ipc_info.vmid = (IDTYPE)g_pal_control->process_id;
 
     /* create the initial TCB, shim can not be run without a tcb */
     shim_tcb_init();
-    update_tls_base(0);
-    __disable_preempt(shim_get_tcb()); // Temporarily disable preemption for delaying any signal
-                                       // that arrives during initialization
 
-    struct debug_buf debug_buf;
-    (void)debug_setbuf(shim_get_tcb(), &debug_buf);
+    log_setprefix(shim_get_tcb());
 
-    debug("Host: %s\n", PAL_CB(host_type));
+    log_debug("Host: %s\n", g_pal_control->host_type);
 
-    DkSetExceptionHandler(&handle_failure, PAL_EVENT_FAILURE);
-
-    g_pal_alloc_align = PAL_CB(alloc_align);
-    if (!IS_POWER_OF_2(g_pal_alloc_align)) {
-        debug("Error during shim_init(): PAL allocation alignment not a power of 2\n");
+    if (!IS_POWER_OF_2(ALLOC_ALIGNMENT)) {
+        log_error("Error during shim_init(): PAL allocation alignment not a power of 2\n");
         DkProcessExit(EINVAL);
     }
 
-    g_manifest_root = PAL_CB(manifest_root);
+    g_manifest_root = g_pal_control->manifest_root;
 
     shim_xstate_init();
 
     if (!create_lock(&__master_lock)) {
-        debug("Error during shim_init(): failed to allocate __master_lock\n");
+        log_error("Error during shim_init(): failed to allocate __master_lock\n");
         DkProcessExit(ENOMEM);
     }
 
@@ -409,20 +424,24 @@ noreturn void* shim_init(int argc, void* args) {
     RUN_INIT(init_slab);
     RUN_INIT(read_environs, envp);
     RUN_INIT(init_str_mgr);
-    RUN_INIT(init_internal_map);
     RUN_INIT(init_rlimit);
     RUN_INIT(init_fs);
     RUN_INIT(init_dcache);
     RUN_INIT(init_handle);
 
-    debug("Shim loaded at %p, ready to initialize\n", &__load_address);
+    log_debug("Shim loaded at %p, ready to initialize\n", &__load_address);
 
-    if (PAL_CB(parent_process)) {
+    if (g_pal_control->parent_process) {
         struct checkpoint_hdr hdr;
+        size_t hdr_size = sizeof(hdr);
 
-        PAL_NUM ret = DkStreamRead(PAL_CB(parent_process), 0, sizeof(hdr), &hdr, NULL, 0);
-        if (ret == PAL_STREAM_ERROR || ret != sizeof(hdr))
-            shim_do_exit(-PAL_ERRNO());
+        int ret = DkStreamRead(g_pal_control->parent_process, 0, &hdr_size, &hdr, NULL, 0);
+        if (ret < 0) {
+            DkProcessExit(pal_to_unix_errno(-ret));
+        } else if (hdr_size != sizeof(hdr)) {
+            log_debug("shim_init: failed to read the whole checkpoint header\n");
+            DkProcessExit(ENODATA);
+        }
 
         assert(hdr.size);
         RUN_INIT(receive_checkpoint_and_restore, &hdr);
@@ -430,7 +449,7 @@ noreturn void* shim_init(int argc, void* args) {
 
     RUN_INIT(init_mount_root);
     RUN_INIT(init_ipc);
-    RUN_INIT(init_process);
+    RUN_INIT(init_process, argc, argv);
     RUN_INIT(init_threading);
     RUN_INIT(init_mount);
     RUN_INIT(init_important_handles);
@@ -441,27 +460,36 @@ noreturn void* shim_init(int argc, void* args) {
     RUN_INIT(init_stack, argv, envp, &new_argp, &new_auxv);
 
     RUN_INIT(init_loader);
+    RUN_INIT(init_signal_handling);
     RUN_INIT(init_ipc_helper);
-    RUN_INIT(init_signal);
 
-    if (PAL_CB(parent_process)) {
+    /* FIXME: `g_pal_control->parent_process` was handed over to IPC code above so we should't be
+     * using it here. */
+    if (g_pal_control->parent_process) {
         /* Notify the parent process */
         IDTYPE child_vmid = g_process_ipc_info.vmid;
-        PAL_NUM ret = DkStreamWrite(PAL_CB(parent_process), 0, sizeof(child_vmid), &child_vmid,
-                                    NULL);
-        if (ret == PAL_STREAM_ERROR || ret != sizeof(child_vmid))
-            shim_do_exit(-PAL_ERRNO());
+        size_t child_vmid_size = sizeof(child_vmid);
+
+        int ret = DkStreamWrite(g_pal_control->parent_process, 0, &child_vmid_size, &child_vmid,
+                                NULL);
+        if (ret < 0) {
+            DkProcessExit(pal_to_unix_errno(-ret));
+        } else if (child_vmid_size != sizeof(child_vmid)) {
+            log_debug("shim_init: failed to write child_vmid\n");
+            DkProcessExit(EPIPE);
+        }
     }
 
-    debug("Shim process initialized\n");
+    log_debug("Shim process initialized\n");
 
     shim_tcb_t* cur_tcb = shim_get_tcb();
 
-    if (cur_tcb->context.regs && shim_context_get_sp(&cur_tcb->context)) {
-        vdso_map_migrate();
+    if (cur_tcb->context.regs) {
         restore_child_context_after_clone(&cur_tcb->context);
         /* UNREACHABLE */
     }
+
+    set_default_tls();
 
     lock(&g_process.fs_lock);
     struct shim_handle* exec = g_process.exec;
@@ -472,7 +500,7 @@ noreturn void* shim_init(int argc, void* args) {
         /* Passing ownership of `exec` to `execute_elf_object`. */
         execute_elf_object(exec, new_argp, new_auxv);
     }
-    shim_do_exit(0);
+    process_exit(0, 0);
 }
 
 static int get_256b_random_hex_string(char* buf, size_t size) {
@@ -483,9 +511,17 @@ static int get_256b_random_hex_string(char* buf, size_t size) {
 
     int ret = DkRandomBitsRead(&random, sizeof(random));
     if (ret < 0)
-        return -convert_pal_errno(-ret);
+        return pal_to_unix_errno(ret);
 
     BYTES2HEXSTR(random, buf, size);
+    return 0;
+}
+
+int vmid_to_uri(IDTYPE vmid, char* uri, size_t uri_len) {
+    int ret = snprintf(uri, uri_len, URI_PREFIX_PIPE "%u", vmid);
+    if (ret < 0 || (size_t)ret >= uri_len) {
+        return -ERANGE;
+    }
     return 0;
 }
 
@@ -511,18 +547,18 @@ int create_pipe(char* name, char* uri, size_t size, PAL_HANDLE* hdl, struct shim
                 return ret;
         }
 
-        debug("Creating pipe: " URI_PREFIX_PIPE_SRV "%s\n", pipename);
+        log_debug("Creating pipe: " URI_PREFIX_PIPE_SRV "%s\n", pipename);
         len = snprintf(uri, size, URI_PREFIX_PIPE_SRV "%s", pipename);
         if (len >= size)
             return -ERANGE;
 
-        pipe = DkStreamOpen(uri, 0, 0, 0, 0);
-        if (!pipe) {
-            if (!use_vmid_for_name && PAL_NATIVE_ERRNO() == PAL_ERROR_STREAMEXIST) {
+        ret = DkStreamOpen(uri, 0, 0, 0, 0, &pipe);
+        if (ret < 0) {
+            if (!use_vmid_for_name && ret == -PAL_ERROR_STREAMEXIST) {
                 /* tried to create a pipe with random name but it already exists */
                 continue;
             }
-            return -PAL_ERRNO();
+            return pal_to_unix_errno(ret);
         }
 
         break; /* succeeded in creating the pipe with random/vmid name */

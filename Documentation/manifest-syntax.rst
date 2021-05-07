@@ -20,24 +20,40 @@ A typical integer entry looks similar to the above but without double quotes::
 Comments can be inlined in a |~| manifest by starting them with a |~| hash sign
 (``# comment...``).
 
+There is also a |~| preprocessor available: :ref:`graphene-manifest
+<graphene-manifest>`, which renders manifests from Jinja templates.
+
 Common syntax
 -------------
 
-Debug type
-^^^^^^^^^^
+Log level
+^^^^^^^^^
 
 ::
 
-    loader.debug_type = "[none|inline|file]"
-    (Default: "none")
+    loader.log_level = "[none|error|warning|debug|trace|all]"
+    (Default: "error")
 
-    loader.debug_file = "[PATH]"
+    loader.log_file = "[PATH]"
 
-This specifies the debug option while running the library OS. If the debug type
-is ``none``, no debug output will be printed to standard output. If the debug
-type is ``inline``, a dmesg-like debug output will be printed inline with
-standard output. If the debug type is ``file``, debug output will be written to
-the file specified in ``loader.debug_file``.
+This configures Graphene's debug log. The ``log_level`` option specifies what
+messages to enable (e.g. ``loader.log_level = "debug"`` will enable all messages
+of type ``error``, ``warning`` and ``debug``). By default, the messages are printed
+to the standard error. If ``log_file`` is specified, the messages will be
+appended to that file.
+
+Graphene outputs log messages of the following types:
+
+* ``error``: A serious error preventing Graphene from operating properly (for
+  example, error initializing one of the components).
+
+* ``warning``: A non-fatal issue. Might mean that application is requesting
+  something unsupported or poorly emulated.
+
+* ``debug``: Detailed information about Graphene's operation and internals.
+
+* ``trace``: More detailed information, such as all system calls requested by
+  the application. Might contain a lot of noise.
 
 Preloaded libraries
 ^^^^^^^^^^^^^^^^^^^
@@ -50,6 +66,16 @@ This syntax specifies the libraries to be preloaded before loading the
 executable. The URIs of the libraries must be separated by commas. The libraries
 must be ELF binaries. This usually contains the LibOS library ``libsysdb.so``.
 
+Entrypoint
+^^^^^^^^^^
+
+::
+
+   libos.entrypoint = "URI"
+
+This specifies the first executable which is to be started when spawning a
+Graphene instance from this manifest file.
+
 Command-line arguments
 ^^^^^^^^^^^^^^^^^^^^^^
 
@@ -61,7 +87,8 @@ This syntax specifies an arbitrary string (typically the executable name) that
 will be passed as the first argument (``argv[0]``) to the executable.
 
 If the string is not specified in the manifest, the application will get
-``argv[0]`` from :program:`pal_loader` invocation.
+``argv[0]`` from :program:`graphene-direct` or :program:`graphene-sgx`
+invocation.
 
 ::
 
@@ -133,6 +160,22 @@ This specifies whether to disable Address Space Layout Randomization (ASLR).
 Since disabling ASLR worsens security of the application, ASLR is enabled by
 default.
 
+Check invalid pointers
+^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+    libos.check_invalid_pointers = [1|0]
+    (Default: 1)
+
+This specifies whether to enable checks of invalid pointers on syscall
+invocations. In particular, when this manifest option is set to ``1``,
+Graphene's LibOS will return an EFAULT error code if a user-supplied buffer
+points to an invalid memory region. Setting this manifest option to ``0`` may
+improve performance for certain workloads but may also generate
+``SIGSEGV/SIGBUS`` exceptions for some applications that specifically use
+invalid pointers (though this is not expected for most real-world applications).
+
 Graphene internal metadata size
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -192,6 +235,20 @@ This specifies whether to allow system calls `eventfd()` and `eventfd2()`. Since
 eventfd emulation currently relies on the host, these system calls are
 disallowed by default due to security concerns.
 
+External SIGTERM injection
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+    sys.enable_sigterm_injection = [1|0]
+    (Default: 0)
+
+This specifies whether to allow for a one-time injection of `SIGTERM` signal
+into Graphene. Could be useful to handle graceful shutdown.
+Be careful! In SGX environment, the untrusted host could inject that signal in
+an arbitrary moment. Examine what your application's `SIGTERM` handler does and
+whether it poses any security threat.
+
 Root FS mount point
 ^^^^^^^^^^^^^^^^^^^
 
@@ -210,13 +267,34 @@ FS mount points
 
 ::
 
-    fs.mount.[identifier].type = "[chroot|...]"
+    fs.mount.[identifier].type = "[chroot|tmpfs]"
     fs.mount.[identifier].path = "[PATH]"
     fs.mount.[identifier].uri  = "[URI]"
 
 This syntax specifies how file systems are mounted inside the library OS. For
-dynamically linked binaries, usually at least one mount point is required in the
-manifest (the mount point of the Glibc library).
+dynamically linked binaries, usually at least one `chroot` mount point is
+required in the manifest (the mount point of the Glibc library).
+
+Graphene currently supports two types of mount points:
+
+* ``chroot``: Host-backed files. All host files and sub-directories found under
+  ``[URI]`` are forwarded to the Graphene instance and placed under ``[PATH]``.
+  For example, with a host-level path specified as
+  ``fs.mount.lib.uri = "file:graphene/Runtime/"`` and forwarded to Graphene via
+  ``fs.mount.lib.path = "/lib"``, a host-level file
+  ``graphene/Runtime/libc.so.6`` is visible to graphenized application as
+  ``/lib/libc.so.6``. This concept is similar to FreeBSD's chroot and to
+  Docker's named volumes. Files under ``chroot`` mount points support mmap and
+  fork/clone.
+
+* ``tmpfs``: Temporary in-memory-only files. These files are *not* backed by
+  host-level files. The tmpfs files are created under ``[PATH]`` (this path is
+  empty on Graphene instance startup) and are destroyed when a Graphene
+  instance terminates. The ``[URI]`` parameter is always ignored. ``tmpfs``
+  is especially useful in trusted environments (like Intel SGX) for securely
+  storing temporary files. This concept is similar to Linux's tmpfs. Files
+  under ``tmpfs`` mount points currently do *not* support mmap and each process
+  has its own, non-shared tmpfs (i.e. processes don't see each other's files).
 
 Start (current working) directory
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -259,6 +337,17 @@ This syntax specifies the size of the enclave set during enclave creation time
 The PAL and library OS code/data count towards this size value, as well as the
 application memory itself: application's code, stack, heap, loaded application
 libraries, etc. The application cannot allocate memory that exceeds this limit.
+
+Non-PIE binaries
+^^^^^^^^^^^^^^^^
+
+::
+
+    sgx.nonpie_binary = [1|0]
+    (Default: 0)
+
+This setting tells Graphene whether to use a specially crafted memory layout,
+which is required to support non-relocatable binaries (non-PIE).
 
 Number of threads
 ^^^^^^^^^^^^^^^^^
@@ -303,14 +392,15 @@ more CPU cores and burning more CPU cycles. For example, a single-threaded
 Redis instance on Linux becomes 5-threaded on Graphene with Exitless. Thus,
 Exitless may negatively impact throughput but may improve latency.
 
-Optional CPU features (AVX, AVX512, MPX)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Optional CPU features (AVX, AVX512, MPX, PKRU)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ::
 
     sgx.require_avx    = [1|0]
     sgx.require_avx512 = [1|0]
     sgx.require_mpx    = [1|0]
+    sgx.require_pkru   = [1|0]
     (Default: 0)
 
 This syntax ensures that the CPU features are available and enabled for the
@@ -325,7 +415,7 @@ ISV Product ID and SVN
 ::
 
     sgx.isvprodid = [NUM]
-    sgx.isnsvn    = [NUM]
+    sgx.isvsvn    = [NUM]
     (Default: 0)
 
 This syntax specifies the ISV Product ID and SVN to be added to the enclave
@@ -400,19 +490,6 @@ trusted and allowed are allowed for access, and Graphene-SGX emits a warning
 message for every such file. This is a convenient way to determine the set of
 files that the ported application uses.
 
-Trusted child processes
-^^^^^^^^^^^^^^^^^^^^^^^
-
-::
-
-    sgx.trusted_children.[identifier] = "[URI of signature file (.sig)]"
-
-This syntax specifies the signatures of allowed child processes of the current
-application. Upon process creation, the enclave in the current (parent) process
-will attest the enclave in the child process, by comparing to the signatures of
-the trusted children. If the child process is not trusted, the enclave will
-refuse to communicate with it.
-
 Attestation and quotes
 ^^^^^^^^^^^^^^^^^^^^^^
 
@@ -434,6 +511,24 @@ be filled with your registered Intel SGX EPID Attestation Service credentials
 For DCAP/ECDSA based attestation, ``ra_client_spid`` must be an empty string
 (this is a hint to Graphene to use DCAP instead of EPID) and
 ``ra_client_linkable`` is ignored.
+
+Pre-heating enclave
+^^^^^^^^^^^^^^^^^^^
+
+::
+
+    sgx.preheat_enclave = [1|0]
+    (Default: 0)
+
+When enabled, this option instructs Graphene to pre-fault all heap pages during
+initialization. This has a negative impact on the total run time, but shifts the
+:term:`EPC` page faults cost to the initialization phase, which can be useful in
+a scenario where a server starts and receives connections / work packages only
+after some time. It also makes the later run time and latency much more
+predictable.
+
+Please note that using this option makes sense only when the :term:`EPC` is
+large enough to hold the whole heap area.
 
 Enabling per-thread and process-wide SGX stats
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -472,7 +567,8 @@ SGX profiling
     (Default: "none")
 
 This syntax specifies whether to enable SGX profiling. Graphene must be compiled
-with ``DEBUG=1`` for this option to work.
+with ``DEBUG=1`` or ``DEBUGOPT=1`` for this option to work (the latter is
+advised).
 
 If this option is set to ``main``, the main process will collect IP samples and
 save them as ``sgx-perf.data``. If it is set to ``all``, all processes will
@@ -481,11 +577,30 @@ collect samples and save them to ``sgx-perf-<PID>.data``.
 The saved files can be viewed with the ``perf`` tool, e.g. ``perf report -i
 sgx-perf.data``.
 
-See :doc:`devel/performance` for more information.
+See :ref:`sgx-profile` for more information.
 
 *Note:* this option is insecure and cannot be used with production enclaves
 (``sgx.debug = 0``). If the production enclave is started with this option set,
 Graphene will fail initialization of the enclave.
+
+::
+
+    sgx.profile.mode = ["aex"|"ocall_inner"|"ocall_outer"]
+    (Default: "aex")
+
+Specifies what events to record:
+
+* ``aex``: Records enclave state during asynchronous enclave exit (AEX). Use
+  this to check where the CPU time is spent in the enclave.
+
+* ``ocall_inner``: Records enclave state during OCALL.
+
+* ``ocall_outer``: Records the outer OCALL function, i.e. what OCALL handlers
+  are going to be executed. Does not include stack information (cannot be used
+  with ``sgx.profile.with_stack = 1``).
+
+See also :ref:`sgx-profile-ocall` for more detailed advice regarding the OCALL
+modes.
 
 ::
 
@@ -507,3 +622,6 @@ lower overhead.
 
 Note that the accuracy is limited by how often the process is interrupted by
 Linux scheduler: the effective maximum is 250 samples per second.
+
+**Note**: This option applies only to ``aex`` mode. In the ``ocall_*`` modes,
+currently all samples are taken.

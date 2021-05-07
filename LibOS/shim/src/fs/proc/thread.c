@@ -3,6 +3,7 @@
 #include <asm/unistd.h>
 #include <errno.h>
 #include <linux/fcntl.h>
+#include <stdalign.h>
 
 #include "pal.h"
 #include "pal_error.h"
@@ -109,7 +110,7 @@ static int find_thread_link(const char* name, struct shim_qstr* link,
     if (nextnext) {
         struct shim_dentry* next_dent = NULL;
 
-        ret = path_lookupat(dent, nextnext, 0, &next_dent, dent->fs);
+        ret = path_lookupat(dent, nextnext, LOOKUP_FOLLOW, &next_dent);
         if (ret < 0)
             goto out;
 
@@ -171,21 +172,16 @@ out:
 }
 
 static int proc_thread_link_stat(const char* name, struct stat* buf) {
-    struct shim_dentry* dent;
+    __UNUSED(name);
+    memset(buf, 0, sizeof(*buf));
 
-    int ret = find_thread_link(name, NULL, &dent);
-    if (ret < 0)
-        return ret;
+    buf->st_dev = buf->st_ino = 1;
+    buf->st_mode              = PERM_r________ | S_IFLNK;
+    buf->st_uid               = 0;
+    buf->st_gid               = 0;
+    buf->st_size              = 0;
 
-    if (!dent->fs || !dent->fs->d_ops || !dent->fs->d_ops->stat) {
-        ret = -EACCES;
-        goto out;
-    }
-
-    ret = dent->fs->d_ops->stat(dent, buf);
-out:
-    put_dentry(dent);
-    return ret;
+    return 0;
 }
 
 static int proc_thread_link_follow_link(const char* name, struct shim_qstr* link) {
@@ -258,7 +254,7 @@ static int proc_match_thread_each_fd(const char* name) {
     return parse_thread_fd(name, NULL, NULL) == 0 ? 1 : 0;
 }
 
-static int proc_list_thread_each_fd(const char* name, struct shim_dirent** buf, int count) {
+static int proc_list_thread_each_fd(const char* name, struct shim_dirent** buf, size_t count) {
     const char* next;
     size_t next_len;
     IDTYPE pid;
@@ -274,7 +270,8 @@ static int proc_list_thread_each_fd(const char* name, struct shim_dirent** buf, 
         return -ENOENT;
 
     struct shim_handle_map* handle_map = get_thread_handle_map(thread);
-    int err = 0, bytes = 0;
+    int err = 0;
+    size_t bytes = 0;
     struct shim_dirent* dirent = *buf;
     struct shim_dirent** last  = NULL;
 
@@ -347,7 +344,7 @@ static int find_thread_each_fd(const char* name, struct shim_qstr* link,
     if (rest) {
         struct shim_dentry* next_dent = NULL;
 
-        ret = path_lookupat(dent, rest, 0, &next_dent, dent->fs);
+        ret = path_lookupat(dent, rest, LOOKUP_NO_FOLLOW, &next_dent);
         if (ret < 0)
             goto out;
 
@@ -592,6 +589,70 @@ static const struct pseudo_fs_ops fs_thread_maps = {
     .stat = &proc_thread_maps_stat,
 };
 
+static int proc_thread_cmdline_open(struct shim_handle* hdl, const char* name, int flags) {
+    if (flags & (O_WRONLY | O_RDWR))
+        return -EACCES;
+
+    const char* next;
+    size_t next_len;
+    char* buffer = NULL;
+    IDTYPE pid = 0;
+
+    int ret = parse_thread_name(name, &pid, &next, &next_len, NULL);
+    if (ret < 0)
+        return ret;
+
+    size_t buffer_size = g_process.cmdline_size;
+    buffer = malloc(buffer_size);
+    if (!buffer) {
+        return -ENOMEM;
+    }
+
+    memcpy(buffer, g_process.cmdline, buffer_size);
+
+    struct shim_str_data* data = malloc(sizeof(*data));
+    if (!data) {
+        free(buffer);
+        return -ENOMEM;
+    }
+
+    data->str          = buffer;
+    data->len          = buffer_size;
+    hdl->type          = TYPE_STR;
+    hdl->flags         = flags & ~O_RDONLY;
+    hdl->acc_mode      = MAY_READ;
+    hdl->info.str.data = data;
+
+    return 0;
+}
+
+static int proc_thread_cmdline_mode(const char* name, mode_t* mode) {
+    // Only used by one file
+    __UNUSED(name);
+    *mode = PERM_r________;
+    return 0;
+}
+
+static int proc_thread_cmdline_stat(const char* name, struct stat* buf) {
+    // Only used by one file
+    __UNUSED(name);
+    memset(buf, 0, sizeof(*buf));
+
+    buf->st_dev = buf->st_ino = 1;
+    buf->st_mode              = PERM_r________ | S_IFREG;
+    buf->st_uid               = 0;
+    buf->st_gid               = 0;
+    buf->st_size              = 0;
+
+    return 0;
+}
+
+static const struct pseudo_fs_ops fs_thread_cmdline = {
+    .open = &proc_thread_cmdline_open,
+    .mode = &proc_thread_cmdline_mode,
+    .stat = &proc_thread_cmdline_stat,
+};
+
 static int proc_thread_dir_open(struct shim_handle* hdl, const char* name, int flags) {
     __UNUSED(hdl);
     __UNUSED(name);
@@ -638,6 +699,10 @@ static int proc_thread_dir_stat(const char* name, struct stat* buf) {
     buf->st_gid = thread->gid;
     unlock(&thread->lock);
     buf->st_size = 4096;
+    /* FIXME: Libs like hwloc use /proc/[..]/task to estimate the number of TIDs (but later
+     * dynamically increase it if needed). Currently we set nlink to 3 (for ".", ".." and one TID);
+     * need a more generic solution. */
+    buf->st_nlink = 3;
 
     put_thread(thread);
     return 0;
@@ -674,12 +739,15 @@ static int walk_cb(struct shim_thread* thread, void* arg) {
     for (; p; p /= 10, l++)
         ;
 
-    if ((void*)(args->buf + 1) + l + 1 > (void*)args->buf_end)
+    /* buf->next below must be properly aligned */
+    size_t buflen = ALIGN_UP(l + 1, alignof(struct shim_dirent));
+
+    if ((void*)(args->buf + 1) + buflen > (void*)args->buf_end)
         return -ENOMEM;
 
     struct shim_dirent* buf = args->buf;
 
-    buf->next      = (void*)(buf + 1) + l + 1;
+    buf->next      = (void*)(buf + 1) + buflen;
     buf->ino       = 1;
     buf->type      = LINUX_DT_DIR;
     buf->name[l--] = 0;
@@ -691,11 +759,11 @@ static int walk_cb(struct shim_thread* thread, void* arg) {
     return 1;
 }
 
-static int proc_list_thread(const char* name, struct shim_dirent** buf, int len) {
+static int proc_list_thread(const char* name, struct shim_dirent** buf, size_t size) {
     __UNUSED(name);  // We know this is for "/proc/self"
     struct walk_thread_arg args = {
         .buf     = *buf,
-        .buf_end = (void*)*buf + len,
+        .buf_end = (void*)*buf + size,
     };
 
     int ret = walk_thread_list(&walk_cb, &args, /*one_shot=*/false);
@@ -717,12 +785,22 @@ const struct pseudo_fs_ops fs_thread = {
     .stat = &proc_thread_dir_stat,
 };
 
+static const struct pseudo_dir dir_task = {
+    .size = 1,
+    .ent  = {
+        {.name_ops = &nm_thread, .fs_ops = &fs_thread, .type = LINUX_DT_DIR},
+    }
+};
+
 const struct pseudo_dir dir_thread = {
-    .size = 5,
+    .size = 7,
     .ent  = {
         {.name = "cwd",  .fs_ops = &fs_thread_link, .type = LINUX_DT_LNK},
         {.name = "exe",  .fs_ops = &fs_thread_link, .type = LINUX_DT_LNK},
         {.name = "root", .fs_ops = &fs_thread_link, .type = LINUX_DT_LNK},
-        {.name = "fd",   .fs_ops = &fs_thread_fd,   .dir = &dir_fd},
+        {.name = "fd",   .fs_ops = &fs_thread_fd,   .dir  = &dir_fd,   .type = LINUX_DT_DIR},
         {.name = "maps", .fs_ops = &fs_thread_maps, .type = LINUX_DT_REG},
-    }};
+        {.name = "task", .fs_ops = &fs_thread,      .dir  = &dir_task, .type = LINUX_DT_DIR},
+        {.name = "cmdline",  .fs_ops = &fs_thread_cmdline, .type = LINUX_DT_REG},
+    }
+};

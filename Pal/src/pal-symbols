@@ -9,9 +9,8 @@ DkThreadResume
 DkThreadSetCpuAffinity
 DkThreadGetCpuAffinity
 DkMutexCreate
-DkNotificationEventCreate
-DkSynchronizationEventCreate
 DkMutexRelease
+DkEventCreate
 DkEventSet
 DkEventClear
 DkSynchronizationObjectWait
@@ -34,7 +33,6 @@ DkProcessCreate
 DkProcessExit
 DkSystemTimeQuery
 DkRandomBitsRead
-DkInstructionCacheFlush
 DkCpuIdRetrieve
 DkObjectClose
 DkSetExceptionHandler
@@ -43,13 +41,10 @@ DkSegmentRegisterSet
 DkStreamChangeName
 DkStreamAttributesSetByHandle
 DkMemoryAvailableQuota
-DkDebugAttachBinary
-DkDebugDetachBinary
+DkDebugMapAdd
+DkDebugMapRemove
 DkAttestationReport
 DkAttestationQuote
 DkSetProtectedFilesKey
 DkDebugLog
-pal_printf
-pal_control_addr
-pal_strerror
-warn
+DkGetPalControl

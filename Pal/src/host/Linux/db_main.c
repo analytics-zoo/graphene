@@ -134,11 +134,12 @@ static struct link_map g_pal_map;
 
 noreturn static void print_usage_and_exit(const char* argv_0) {
     const char* self = argv_0 ?: "<this program>";
-    printf("USAGE:\n"
-           "\tFirst process: %s <path to libpal.so> init <executable> args...\n"
-           "\tChildren:      %s <path to libpal.so> child <parent_pipe_fd> args...\n",
-           self, self);
-    printf("This is an internal interface. Use pal_loader to launch applications in Graphene.\n");
+    log_always("USAGE:\n"
+               "\tFirst process: %s <path to libpal.so> init <application> args...\n"
+               "\tChildren:      %s <path to libpal.so> child <parent_pipe_fd> args...\n",
+               self, self);
+    log_always("This is an internal interface. Use pal_loader to launch applications in "
+               "Graphene.\n");
     _DkProcessExit(1);
 }
 
@@ -227,40 +228,29 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
 
     g_linux_state.uid = g_uid;
     g_linux_state.gid = g_gid;
-    g_linux_state.process_id = (start_time & (~0xffff)) | g_linux_state.pid;
+    g_linux_state.process_id = g_linux_state.pid;
 
     if (!g_linux_state.parent_process_id)
         g_linux_state.parent_process_id = g_linux_state.process_id;
 
     PAL_HANDLE parent = NULL;
-    PAL_HANDLE exec_handle = NULL;
     char* manifest = NULL;
+    char* exec_uri = NULL; // TODO: This should be removed from here and handled by LibOS.
     if (first_process) {
-        char* exec_uri = alloc_concat(URI_PREFIX_FILE, URI_PREFIX_FILE_LEN, argv[3], -1);
-        char* manifest_path = alloc_concat(argv[3], -1, ".manifest", -1);
-        if (!exec_uri || !manifest_path)
+        const char* application_path = argv[3];
+        char* manifest_path = alloc_concat(application_path, -1, ".manifest", -1);
+        if (!manifest_path)
             INIT_FAIL(PAL_ERROR_NOMEM, "Out of memory");
-        ret = _DkStreamOpen(&exec_handle, exec_uri, PAL_ACCESS_RDONLY, 0, 0, PAL_OPTION_CLOEXEC);
-        free(exec_uri);
-        if (ret < 0) {
-            INIT_FAIL(-ret, "Failed to open file to execute");
-        }
-
-        if (!is_elf_object(exec_handle)) {
-            INIT_FAIL(EINVAL, "First argument passed to Graphene must be an executable");
-        }
 
         ret = read_text_file_to_cstr(manifest_path, &manifest);
-        if (ret == -ENOENT) {
-            ret = read_text_file_to_cstr("manifest", &manifest);
-        }
         if (ret < 0) {
             INIT_FAIL(-ret, "Reading manifest failed");
         }
     } else {
         // Children receive their argv and config via IPC.
         int parent_pipe_fd = atoi(argv[3]);
-        init_child_process(parent_pipe_fd, &parent, &exec_handle, &manifest);
+        init_child_process(parent_pipe_fd, &parent, &exec_uri, &manifest);
+        assert(exec_uri);
     }
     assert(manifest);
 
@@ -273,79 +263,25 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     if (!g_pal_state.manifest_root)
         INIT_FAIL_MANIFEST(PAL_ERROR_DENIED, errbuf);
 
-    /* call to main function */
-    pal_main((PAL_NUM)g_linux_state.parent_process_id, exec_handle, NULL, parent, first_thread,
-             first_process ? argv + 3 : argv + 4, envp);
-}
-
-/* Opens a pseudo-file describing HW resources such as online CPUs and counts the number of
- * HW resources present in the file (if count == true) or simply reads the integer stored in the
- * file (if count == false). For example on a single-core machine, calling this function on
- * `/sys/devices/system/cpu/online` with count == true will return 1 and 0 with count == false.
- * Returns PAL error code on failure.
- * N.B: Understands complex formats like "1,3-5,6" when called with count == true.
- */
-int get_hw_resource(const char* filename, bool count) {
-    int fd = INLINE_SYSCALL(open, 3, filename, O_RDONLY | O_CLOEXEC, 0);
-    if (IS_ERR(fd))
-        return unix_to_pal_error(ERRNO(fd));
-
-    char buf[64];
-    int ret = INLINE_SYSCALL(read, 3, fd, buf, sizeof(buf) - 1);
-    INLINE_SYSCALL(close, 1, fd);
-    if (IS_ERR(ret))
-        return unix_to_pal_error(ERRNO(ret));
-
-    buf[ret] = '\0'; /* ensure null-terminated buf even in partial read */
-
-    char* end;
-    char* ptr = buf;
-    int resource_cnt = 0;
-    int retval = -PAL_ERROR_STREAMNOTEXIST;
-    while (*ptr) {
-        while (*ptr == ' ' || *ptr == '\t' || *ptr == ',')
-            ptr++;
-
-        int firstint = (int)strtol(ptr, &end, 10);
-        if (ptr == end)
-            break;
-
-        /* caller wants to read an int stored in the file */
-        if (!count) {
-            if (*end == '\n' || *end == '\0')
-                retval = firstint;
-            return retval;
+    if (!exec_uri) {
+        ret = toml_string_in(g_pal_state.manifest_root, "libos.entrypoint", &exec_uri);
+        if (ret < 0) {
+            INIT_FAIL_MANIFEST(PAL_ERROR_INVAL, "Cannot parse 'libos.entrypoint'\n");
+        } else if (exec_uri == NULL) {
+            // Temporary hack for PAL regression tests. TODO: We should always error out here.
+            char* pal_entrypoint;
+            ret = toml_string_in(g_pal_state.manifest_root, "pal.entrypoint", &pal_entrypoint);
+            if (ret < 0)
+                INIT_FAIL(PAL_ERROR_INVAL, "Cannot parse 'pal.entrypoint'\n");
+            if (!pal_entrypoint)
+                INIT_FAIL(PAL_ERROR_INVAL,
+                          "'libos.entrypoint' must be specified in the manifest\n");
+        } else if (!strstartswith(exec_uri, URI_PREFIX_FILE)) {
+            INIT_FAIL(PAL_ERROR_INVAL, "'libos.entrypoint' is missing 'file:' prefix\n");
         }
-
-        /* caller wants to count the number of HW resources */
-        if (*end == '\0' || *end == ',' || *end == '\n') {
-            /* single HW resource index, count as one more */
-            resource_cnt++;
-        } else if (*end == '-') {
-            /* HW resource range, count how many HW resources are in range */
-            ptr = end + 1;
-            int secondint = (int)strtol(ptr, &end, 10);
-            if (secondint > firstint)
-                resource_cnt += secondint - firstint + 1; // inclusive (e.g., 0-7, or 8-16)
-        }
-        ptr = end;
     }
 
-    if (count && resource_cnt > 0)
-        retval = resource_cnt;
-
-    return retval;
-}
-
-ssize_t read_file_buffer(const char* filename, char* buf, size_t buf_size) {
-    int fd;
-
-    fd = INLINE_SYSCALL(open, 2, filename, O_RDONLY);
-    if (fd < 0)
-        return fd;
-
-    ssize_t n = INLINE_SYSCALL(read, 3, fd, buf, buf_size);
-    INLINE_SYSCALL(close, 1, fd);
-
-    return n;
+    /* call to main function */
+    pal_main((PAL_NUM)g_linux_state.parent_process_id, exec_uri, parent, first_thread,
+             first_process ? argv + 3 : argv + 4, envp);
 }

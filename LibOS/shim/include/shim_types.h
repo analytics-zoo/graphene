@@ -221,16 +221,13 @@ enum {
     MSG_OOB      = 0x01,   /* Process out-of-band data. */
     MSG_PEEK     = 0x02,   /* Peek at incoming messages. */
     MSG_DONTWAIT = 0x40,   /* Nonblocking IO. */
-    MSG_WAITALL  = 0x100,
+    MSG_WAITALL  = 0x100,  /* Wait for full request or error */
     MSG_NOSIGNAL = 0x4000, /* Do not generate SIGPIPE. */
 #define MSG_OOB      MSG_OOB
 #define MSG_PEEK     MSG_PEEK
 #define MSG_DONTWAIT MSG_DONTWAIT
-#define MSG_WAITALL MSG_WAITALL
-#define MSG_NOSIGNAL MSG_NOSIGNAL
-};
 
-struct msghdr {
+#define MSG_WAITALL  MSG_WAITALL
     void* msg_name;  /* Address to send to/receive from.  */
     int msg_namelen; /* Length of address data.  */
 
@@ -365,7 +362,6 @@ struct shim_str {
 /* Use qstr for names. This has fixed size string + string object
  * if len > SHIM_QSTR_SIZE then use overflow string */
 struct shim_qstr {
-    HASHTYPE hash;
     size_t len;
     char name[QSTR_SIZE];
     struct shim_str* oflow;

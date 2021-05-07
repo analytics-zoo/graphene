@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <linux/fcntl.h>
+#include <stdalign.h>
 
 #include "pal.h"
 #include "pal_error.h"
@@ -31,14 +32,14 @@ int do_handle_read(struct shim_handle* hdl, void* buf, int count) {
     if (!fs->fs_ops->read)
         return -EBADF;
 
-    if (hdl->type == TYPE_DIR)
+    if (hdl->is_dir)
         return -EISDIR;
 
     return fs->fs_ops->read(hdl, buf, count);
 }
 
 long shim_do_read(int fd, void* buf, size_t count) {
-    if (!buf || test_user_memory(buf, count, true))
+    if (test_user_memory(buf, count, true))
         return -EFAULT;
 
     struct shim_handle* hdl = get_fd_handle(fd, NULL, NULL);
@@ -66,14 +67,14 @@ int do_handle_write(struct shim_handle* hdl, const void* buf, int count) {
     if (!fs->fs_ops->write)
         return -EBADF;
 
-    if (hdl->type == TYPE_DIR)
+    if (hdl->is_dir)
         return -EISDIR;
 
     return fs->fs_ops->write(hdl, buf, count);
 }
 
 long shim_do_write(int fd, const void* buf, size_t count) {
-    if (!buf || test_user_memory((void*)buf, count, false))
+    if (test_user_memory((void*)buf, count, false))
         return -EFAULT;
 
     struct shim_handle* hdl = get_fd_handle(fd, NULL, NULL);
@@ -158,7 +159,7 @@ long shim_do_lseek(int fd, off_t offset, int origin) {
         goto out;
     }
 
-    if (hdl->type == TYPE_DIR) {
+    if (hdl->is_dir) {
         /* TODO: handle lseek'ing of directories */
         ret = -ENOSYS;
         goto out;
@@ -171,7 +172,7 @@ out:
 }
 
 long shim_do_pread64(int fd, char* buf, size_t count, loff_t pos) {
-    if (!buf || test_user_memory(buf, count, true))
+    if (test_user_memory(buf, count, true))
         return -EFAULT;
 
     if (pos < 0)
@@ -195,7 +196,7 @@ long shim_do_pread64(int fd, char* buf, size_t count, loff_t pos) {
     if (!fs->fs_ops->read)
         goto out;
 
-    if (hdl->type == TYPE_DIR)
+    if (hdl->is_dir)
         goto out;
 
     int offset = fs->fs_ops->seek(hdl, 0, SEEK_CUR);
@@ -221,7 +222,7 @@ out:
 }
 
 long shim_do_pwrite64(int fd, char* buf, size_t count, loff_t pos) {
-    if (!buf || test_user_memory(buf, count, false))
+    if (test_user_memory(buf, count, false))
         return -EFAULT;
 
     if (pos < 0)
@@ -245,7 +246,7 @@ long shim_do_pwrite64(int fd, char* buf, size_t count, loff_t pos) {
     if (!fs->fs_ops->write)
         goto out;
 
-    if (hdl->type == TYPE_DIR)
+    if (hdl->is_dir)
         goto out;
 
     int offset = fs->fs_ops->seek(hdl, 0, SEEK_CUR);
@@ -292,7 +293,7 @@ static inline int get_dirent_type(mode_t type) {
 }
 
 long shim_do_getdents(int fd, struct linux_dirent* buf, size_t count) {
-    if (!buf || test_user_memory(buf, count, true))
+    if (test_user_memory(buf, count, true))
         return -EFAULT;
 
     struct shim_handle* hdl = get_fd_handle(fd, NULL, NULL);
@@ -301,7 +302,7 @@ long shim_do_getdents(int fd, struct linux_dirent* buf, size_t count) {
 
     int ret = -EACCES;
 
-    if (hdl->type != TYPE_DIR) {
+    if (!hdl->is_dir) {
         ret = -ENOTDIR;
         goto out_no_unlock;
     }
@@ -328,8 +329,12 @@ long shim_do_getdents(int fd, struct linux_dirent* buf, size_t count) {
             goto out;
     }
 
+/* Size calculation for dirent considering alignment restrictions for b->d_ino */
+// TODO: This "+ 1" below is most likely not needed (NULL byte is already included in
+//       linux_dirent_tail).
 #define DIRENT_SIZE(len) \
-    (sizeof(struct linux_dirent) + sizeof(struct linux_dirent_tail) + (len) + 1)
+    ALIGN_UP(sizeof(struct linux_dirent) + sizeof(struct linux_dirent_tail) + (len) + 1, \
+             alignof(struct linux_dirent))
 
 #define ASSIGN_DIRENT(dent, name, type)                                                  \
     do {                                                                                 \
@@ -337,7 +342,7 @@ long shim_do_getdents(int fd, struct linux_dirent* buf, size_t count) {
         if (bytes + DIRENT_SIZE(len) > count)                                            \
             goto done;                                                                   \
                                                                                          \
-        struct linux_dirent_tail* bt = (void*)b + sizeof(struct linux_dirent) + len + 1; \
+        struct linux_dirent_tail* bt = (void*)b + DIRENT_SIZE(len) - sizeof(*bt);        \
                                                                                          \
         b->d_ino    = (dent)->ino;                                                       \
         b->d_off    = ++dirhdl->offset;                                                  \
@@ -348,8 +353,8 @@ long shim_do_getdents(int fd, struct linux_dirent* buf, size_t count) {
         bt->pad    = 0;                                                                  \
         bt->d_type = (type);                                                             \
                                                                                          \
-        b = (void*)bt + sizeof(struct linux_dirent_tail);                                \
-        bytes += DIRENT_SIZE(len);                                                       \
+        bytes += b->d_reclen;                                                            \
+        b = (void*)b + b->d_reclen;                                                      \
     } while (0)
 
     if (dirhdl->dot) {
@@ -396,7 +401,7 @@ out_no_unlock:
 }
 
 long shim_do_getdents64(int fd, struct linux_dirent64* buf, size_t count) {
-    if (!buf || test_user_memory(buf, count, true))
+    if (test_user_memory(buf, count, true))
         return -EFAULT;
 
     struct shim_handle* hdl = get_fd_handle(fd, NULL, NULL);
@@ -405,15 +410,15 @@ long shim_do_getdents64(int fd, struct linux_dirent64* buf, size_t count) {
 
     int ret = -EACCES;
 
-    if (hdl->type != TYPE_DIR) {
+    if (!hdl->is_dir) {
         ret = -ENOTDIR;
-        goto out;
+        goto out_no_unlock;
     }
 
     /* DEP 3/3/17: Properly handle an unlinked directory */
     if (hdl->dentry->state & DENTRY_NEGATIVE) {
         ret = -ENOENT;
-        goto out;
+        goto out_no_unlock;
     }
 
     lock(&hdl->lock);
@@ -430,7 +435,9 @@ long shim_do_getdents64(int fd, struct linux_dirent64* buf, size_t count) {
             goto out;
     }
 
-#define DIRENT_SIZE(len) (sizeof(struct linux_dirent64) + (len) + 1)
+/* Size calculation for dirent considering alignment restrictions for b->d_ino */
+#define DIRENT_SIZE(len) ALIGN_UP(sizeof(struct linux_dirent64) + (len) + 1, \
+                                  alignof(struct linux_dirent64))
 
 #define ASSIGN_DIRENT(dent, name, type)       \
     do {                                      \
@@ -445,8 +452,8 @@ long shim_do_getdents64(int fd, struct linux_dirent64* buf, size_t count) {
                                               \
         memcpy(b->d_name, name, len + 1);     \
                                               \
-        b = (void*)b + DIRENT_SIZE(len);      \
-        bytes += DIRENT_SIZE(len);            \
+        bytes += b->d_reclen;                 \
+        b = (void*)b + b->d_reclen;           \
     } while (0)
 
     if (dirhdl->dot) {
@@ -485,8 +492,9 @@ done:
      * hold anything */
     if (bytes == 0 && (dirhdl->dot || dirhdl->dotdot || (dirhdl->ptr && *dirhdl->ptr)))
         ret = -EINVAL;
-    unlock(&hdl->lock);
 out:
+    unlock(&hdl->lock);
+out_no_unlock:
     put_handle(hdl);
     return ret;
 }
@@ -502,7 +510,7 @@ long shim_do_fsync(int fd) {
     if (!fs || !fs->fs_ops)
         goto out;
 
-    if (hdl->type == TYPE_DIR)
+    if (hdl->is_dir)
         goto out;
 
     if (!fs->fs_ops->flush) {
@@ -532,7 +540,7 @@ long shim_do_truncate(const char* path, loff_t length) {
     if (!path || test_user_string(path))
         return -EFAULT;
 
-    if ((ret = path_lookupat(NULL, path, 0, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(/*start=*/NULL, path, LOOKUP_FOLLOW, &dent)) < 0)
         return ret;
 
     struct shim_mount* fs = dent->fs;
@@ -580,7 +588,7 @@ long shim_do_ftruncate(int fd, loff_t length) {
     if (!fs || !fs->fs_ops)
         goto out;
 
-    if (hdl->type == TYPE_DIR || !fs->fs_ops->truncate)
+    if (hdl->is_dir || !fs->fs_ops->truncate)
         goto out;
 
     ret = fs->fs_ops->truncate(hdl, length);

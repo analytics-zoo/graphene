@@ -44,7 +44,7 @@ long shim_do_unlinkat(int dfd, const char* pathname, int flag) {
     if (*pathname != '/' && (ret = get_dirfd_dentry(dfd, &dir)) < 0)
         return ret;
 
-    if ((ret = path_lookupat(dir, pathname, LOOKUP_OPEN, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(dir, pathname, LOOKUP_NO_FOLLOW, &dent)) < 0)
         goto out;
 
     if (!dent->parent) {
@@ -80,7 +80,7 @@ out:
     if (dir)
         put_dentry(dir);
     if (dent) {
-        put_dentry_maybe_delete(dent);
+        put_dentry(dent);
     }
     return ret;
 }
@@ -119,7 +119,8 @@ long shim_do_rmdir(const char* pathname) {
     if (test_user_string(pathname))
         return -EFAULT;
 
-    if ((ret = path_lookupat(NULL, pathname, LOOKUP_OPEN | LOOKUP_DIRECTORY, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(/*start=*/NULL, pathname, LOOKUP_NO_FOLLOW | LOOKUP_DIRECTORY,
+                             &dent)) < 0)
         return ret;
 
     if (!dent->parent) {
@@ -175,7 +176,7 @@ long shim_do_fchmodat(int dfd, const char* filename, mode_t mode) {
     if (*filename != '/' && (ret = get_dirfd_dentry(dfd, &dir)) < 0)
         return ret;
 
-    if ((ret = path_lookupat(dir, filename, LOOKUP_OPEN, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(dir, filename, LOOKUP_FOLLOW, &dent)) < 0)
         goto out;
 
     if (dent->fs && dent->fs->d_ops && dent->fs->d_ops->chmod) {
@@ -204,6 +205,11 @@ long shim_do_fchmod(int fd, mode_t mode) {
 
     struct shim_dentry* dent = hdl->dentry;
     int ret = 0;
+
+    if (!dent) {
+        ret = -EINVAL;
+        goto out;
+    }
 
     if (dent->fs && dent->fs->d_ops && dent->fs->d_ops->chmod) {
         if ((ret = dent->fs->d_ops->chmod(dent, mode)) < 0)
@@ -240,7 +246,7 @@ long shim_do_fchownat(int dfd, const char* filename, uid_t uid, gid_t gid, int f
     if (*filename != '/' && (ret = get_dirfd_dentry(dfd, &dir)) < 0)
         return ret;
 
-    if ((ret = path_lookupat(dir, filename, LOOKUP_OPEN, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(dir, filename, LOOKUP_FOLLOW, &dent)) < 0)
         goto out;
 
     /* XXX: do nothing now */
@@ -263,8 +269,8 @@ long shim_do_fchown(int fd, uid_t uid, gid_t gid) {
     return 0;
 }
 
-#define MAP_SIZE (g_pal_alloc_align * 256) /* mmap/memcpy in 1MB chunks for sendfile() */
-#define BUF_SIZE 2048                      /* read/write in 2KB chunks for sendfile() */
+#define MAP_SIZE (ALLOC_ALIGNMENT * 256)  /* mmap/memcpy in 1MB chunks for sendfile() */
+#define BUF_SIZE 2048                     /* read/write in 2KB chunks for sendfile() */
 
 /* TODO: The below implementation needs to be refactored: (1) remove offseto, it is always zero;
  *       (2) simplify handling of non-blocking handles, (3) instead of relying on PAL to mmap
@@ -347,7 +353,7 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
     if (!do_mapi && (hdli->flags & O_NONBLOCK) && fsi->fs_ops->setflags) {
         int ret = fsi->fs_ops->setflags(hdli, 0);
         if (!ret) {
-            debug("mark handle %s as blocking\n", qstrgetstr(&hdli->uri));
+            log_debug("mark handle %s as blocking\n", qstrgetstr(&hdli->uri));
             do_marki = true;
         }
     }
@@ -355,7 +361,7 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
     if (!do_mapo && (hdlo->flags & O_NONBLOCK) && fso->fs_ops->setflags) {
         int ret = fso->fs_ops->setflags(hdlo, 0);
         if (!ret) {
-            debug("mark handle %s as blocking\n", qstrgetstr(&hdlo->uri));
+            log_debug("mark handle %s as blocking\n", qstrgetstr(&hdlo->uri));
             do_marko = true;
         }
     }
@@ -378,7 +384,7 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
                 if ((hdli->flags & O_NONBLOCK) && fsi->fs_ops->setflags) {
                     int ret = fsi->fs_ops->setflags(hdli, 0);
                     if (!ret) {
-                        debug("mark handle %s as blocking\n", qstrgetstr(&hdli->uri));
+                        log_debug("mark handle %s as blocking\n", qstrgetstr(&hdli->uri));
                         do_marki = true;
                     }
                 }
@@ -397,7 +403,7 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
                 if ((hdlo->flags & O_NONBLOCK) && fso->fs_ops->setflags) {
                     int ret = fso->fs_ops->setflags(hdlo, 0);
                     if (!ret) {
-                        debug("mark handle %s as blocking\n", qstrgetstr(&hdlo->uri));
+                        log_debug("mark handle %s as blocking\n", qstrgetstr(&hdlo->uri));
                         do_marko = true;
                     }
                 }
@@ -409,6 +415,7 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
         if (do_mapi && do_mapo) {
             copysize = count - bytes > bufsize ? bufsize : count - bytes;
             memcpy(bufo + boffo, bufi + boffi, copysize);
+            /* XXX: ??? Where is vma bookkeeping? Hans, get ze flammenwerfer... */
             DkVirtualMemoryFree(bufi, ALLOC_ALIGN_UP(bufsize + boffi));
             bufi = NULL;
             if (fso->fs_ops->flush) {
@@ -416,6 +423,7 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
                  * explicit flush before freeing PF's mmapped region `bufo` */
                 fso->fs_ops->flush(hdlo);
             }
+            /* XXX: ??? Where is vma bookkeeping? Hans, get ze flammenwerfer... */
             DkVirtualMemoryFree(bufo, ALLOC_ALIGN_UP(bufsize + boffo));
             bufo = NULL;
         } else if (do_mapo) {
@@ -425,12 +433,14 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
                  * explicit flush before freeing PF's mmapped region `bufo` */
                 fso->fs_ops->flush(hdlo);
             }
+            /* XXX: ??? Where is vma bookkeeping? Hans, get ze flammenwerfer... */
             DkVirtualMemoryFree(bufo, ALLOC_ALIGN_UP(bufsize + boffo));
             bufo = NULL;
             if (copysize < 0)
                 break;
         } else if (do_mapi) {
             copysize = fso->fs_ops->write(hdlo, bufi + boffi, bufsize);
+            /* XXX: ??? Where is vma bookkeeping? Hans, get ze flammenwerfer... */
             DkVirtualMemoryFree(bufi, ALLOC_ALIGN_UP(bufsize + boffi));
             bufi = NULL;
             if (copysize < 0)
@@ -450,7 +460,7 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
                 break;
         }
 
-        debug("copy %d bytes\n", copysize);
+        log_debug("copy %d bytes\n", copysize);
         bytes += copysize;
         offi += copysize;
         offo += copysize;
@@ -472,12 +482,12 @@ static ssize_t handle_copy(struct shim_handle* hdli, off_t* offseti, struct shim
     }
 
     if (do_marki && (hdli->flags & O_NONBLOCK)) {
-        debug("mark handle %s as nonblocking\n", qstrgetstr(&hdli->uri));
+        log_debug("mark handle %s as nonblocking\n", qstrgetstr(&hdli->uri));
         fsi->fs_ops->setflags(hdli, O_NONBLOCK);
     }
 
     if (do_marko && (hdlo->flags & O_NONBLOCK)) {
-        debug("mark handle %s as nonblocking\n", qstrgetstr(&hdlo->uri));
+        log_debug("mark handle %s as nonblocking\n", qstrgetstr(&hdlo->uri));
         fso->fs_ops->setflags(hdlo, O_NONBLOCK);
     }
 
@@ -567,7 +577,7 @@ long shim_do_renameat(int olddirfd, const char* oldpath, int newdirfd, const cha
         goto out;
     }
 
-    if ((ret = path_lookupat(old_dir_dent, oldpath, LOOKUP_OPEN, &old_dent, NULL)) < 0) {
+    if ((ret = path_lookupat(old_dir_dent, oldpath, LOOKUP_NO_FOLLOW, &old_dent)) < 0) {
         goto out;
     }
 
@@ -580,14 +590,9 @@ long shim_do_renameat(int olddirfd, const char* oldpath, int newdirfd, const cha
         goto out;
     }
 
-    ret = path_lookupat(new_dir_dent, newpath, LOOKUP_OPEN | LOOKUP_CREATE, &new_dent, NULL);
-    if (ret < 0) {
-        if (ret != -ENOENT || !new_dent ||
-            (new_dent->state & (DENTRY_NEGATIVE | DENTRY_VALID)) !=
-                (DENTRY_NEGATIVE | DENTRY_VALID)) {
-            goto out;
-        }
-    }
+    ret = path_lookupat(new_dir_dent, newpath, LOOKUP_NO_FOLLOW | LOOKUP_CREATE, &new_dent);
+    if (ret < 0)
+        goto out;
 
     // Both dentries should have a ref count of at least 2 at this point
     assert(REF_GET(old_dent->ref_count) >= 2);
@@ -652,7 +657,7 @@ out:
 long shim_do_chroot(const char* filename) {
     int ret = 0;
     struct shim_dentry* dent = NULL;
-    if ((ret = path_lookupat(NULL, filename, 0, &dent, NULL)) < 0)
+    if ((ret = path_lookupat(/*start=*/NULL, filename, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &dent)) < 0)
         goto out;
 
     if (!dent) {

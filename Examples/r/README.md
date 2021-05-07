@@ -4,8 +4,6 @@ This directory contains an example for running R in Graphene, including the
 Makefile and a template for generating the manifest. The application was
 tested on Ubuntu 16.04, with both normal Linux and SGX platforms.
 
-**This example is temporarily broken until we rewrite Graphene loader**
-
 # Generating the manifest
 
 ## Building for Linux
@@ -34,12 +32,12 @@ Here's an example of running an R script under Graphene:
 
 Without SGX:
 ```
-./pal_loader ./R --slave --vanilla -f scripts/sample.r
-./pal_loader ./R --slave --vanilla -f scripts/R-benchmark-25.R
+graphene-direct ./R --slave --vanilla -f scripts/sample.r
+graphene-direct ./R --slave --vanilla -f scripts/R-benchmark-25.R
 ```
 
 With SGX:
 ```
-SGX=1 ./pal_loader ./R --slave --vanilla -f scripts/sample.r
-SGX=1 ./pal_loader ./R --slave --vanilla -f scripts/R-benchmark-25.R
+graphene-sgx ./R --slave --vanilla -f scripts/sample.r
+graphene-sgx ./R --slave --vanilla -f scripts/R-benchmark-25.R
 ```

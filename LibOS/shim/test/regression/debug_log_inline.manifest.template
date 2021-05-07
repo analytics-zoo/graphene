@@ -1,14 +1,15 @@
+loader.preload = "file:{{ graphene.libos }}"
+libos.entrypoint = "file:bootstrap"
 loader.argv0_override = "bootstrap"
 
-loader.preload = "file:../../src/libsysdb.so"
 loader.env.LD_LIBRARY_PATH = "/lib"
-loader.debug_type = "inline"
+loader.log_level = "debug"
 
 fs.mount.lib.type = "chroot"
 fs.mount.lib.path = "/lib"
-fs.mount.lib.uri = "file:../../../../Runtime"
+fs.mount.lib.uri = "file:{{ graphene.runtimedir() }}"
 
-sgx.trusted_files.ld = "file:../../../../Runtime/ld-linux-x86-64.so.2"
-sgx.trusted_files.libc = "file:../../../../Runtime/libc.so.6"
+sgx.trusted_files.runtime = "file:{{ graphene.runtimedir() }}/"
+sgx.trusted_files.bootstrap = "file:bootstrap"
 
-sgx.static_address = 1
+sgx.nonpie_binary = 1

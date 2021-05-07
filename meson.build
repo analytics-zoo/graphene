@@ -17,7 +17,7 @@ project(
 )
 
 prefix = get_option('prefix')
-pkglibexecdir = join_paths(get_option('libexecdir'), meson.project_name())
+pkglibdir = join_paths(get_option('libdir'), meson.project_name())
 pkgdatadir = join_paths(get_option('datadir'), meson.project_name())
 
 direct = get_option('direct') == 'enabled'
@@ -27,5 +27,6 @@ sgx = get_option('sgx') == 'enabled'
 python3mod = import('python3')
 python3 = python3mod.find_python()
 
+subdir('LibOS')
 subdir('Runtime')
 subdir('python')

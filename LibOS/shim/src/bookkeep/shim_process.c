@@ -20,7 +20,7 @@ typedef bool (*child_cmp_t)(const struct shim_child_process*, unsigned long);
 
 struct shim_process g_process = { .pid = 0 };
 
-int init_process(void) {
+int init_process(int argc, const char** argv) {
     if (g_process.pid) {
         /* `g_process` is already initialized, e.g. via checkpointing code. */
         return 0;
@@ -46,9 +46,9 @@ int init_process(void) {
     g_process.umask = 0;
 
     struct shim_dentry* dent = NULL;
-    int ret = path_lookupat(NULL, "/", 0, &dent, NULL);
+    int ret = path_lookupat(/*start=*/NULL, "/", LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &dent);
     if (ret < 0) {
-        debug("Could not set up dentry for \"/\", something is seriously broken.\n");
+        log_error("Could not set up dentry for \"/\", something is seriously broken.\n");
         return ret;
     }
     g_process.root = dent;
@@ -59,6 +59,24 @@ int init_process(void) {
 
     /* `g_process.exec` will be initialized later on (in `init_important_handles`). */
     g_process.exec = NULL;
+
+    /* The command line arguments passed are stored in /proc/self/cmdline as part of the proc fs.
+     * They are not separated by space, but by NUL instead. So, it is essential to maintain the
+     * cmdline_size also as a member here. */
+
+    g_process.cmdline_size = 0;
+    memset(g_process.cmdline, '\0', ARRAY_SIZE(g_process.cmdline));
+    size_t tmp_size = 0;
+
+    for (int i = 0; i < argc; i++) {
+        if (tmp_size + strlen(argv[i]) + 1 > ARRAY_SIZE(g_process.cmdline))
+            return -ENOMEM;
+
+        memcpy(g_process.cmdline + tmp_size, argv[i], strlen(argv[i]));
+        tmp_size += strlen(argv[i]) + 1;
+    }
+
+    g_process.cmdline_size = tmp_size;
 
     return 0;
 }
@@ -147,7 +165,7 @@ static bool mark_child_exited(child_cmp_t child_cmp, unsigned long arg, IDTYPE c
         fill_siginfo_code_and_status(&info, signal, exit_code);
         int x = kill_current_proc(&info);
         if (x < 0) {
-            debug("Sending child death signal failed: %d!\n", x);
+            log_error("Sending child death signal failed: %d!\n", x);
         }
     }
 
@@ -208,6 +226,10 @@ BEGIN_CP_FUNC(process_description) {
     new_process->pid = process->pid;
     new_process->ppid = process->ppid;
     new_process->pgid = process->pgid;
+
+    /* copy cmdline (used by /proc/[pid]/cmdline) from the current process */
+    memcpy(new_process->cmdline, g_process.cmdline, ARRAY_SIZE(g_process.cmdline));
+    new_process->cmdline_size = g_process.cmdline_size;
 
     DO_CP_MEMBER(dentry, process, new_process, root);
     DO_CP_MEMBER(dentry, process, new_process, cwd);

@@ -1,5 +1,5 @@
 #include "pal.h"
-#include "pal_debug.h"
+#include "pal_regression.h"
 
 #define SYMBOL_ADDR(sym)                                                    \
     ({                                                                      \
@@ -8,7 +8,7 @@
         _sym;                                                               \
     })
 
-#define PRINT_SYMBOL(sym) pal_printf(#sym " = %p\n", SYMBOL_ADDR(sym))
+#define PRINT_SYMBOL(sym) pal_printf("symbol: %s = %p\n", #sym, SYMBOL_ADDR(sym))
 
 int main(int argc, char** argv, char** envp) {
     PRINT_SYMBOL(DkVirtualMemoryAlloc);
@@ -46,8 +46,7 @@ int main(int argc, char** argv, char** envp) {
 
     PRINT_SYMBOL(DkMutexCreate);
     PRINT_SYMBOL(DkMutexRelease);
-    PRINT_SYMBOL(DkNotificationEventCreate);
-    PRINT_SYMBOL(DkSynchronizationEventCreate);
+    PRINT_SYMBOL(DkEventCreate);
     PRINT_SYMBOL(DkEventSet);
     PRINT_SYMBOL(DkEventClear);
     PRINT_SYMBOL(DkSynchronizationObjectWait);
@@ -56,7 +55,6 @@ int main(int argc, char** argv, char** envp) {
 
     PRINT_SYMBOL(DkSystemTimeQuery);
     PRINT_SYMBOL(DkRandomBitsRead);
-    PRINT_SYMBOL(DkInstructionCacheFlush);
 #if defined(__x86_64__)
     PRINT_SYMBOL(DkSegmentRegisterGet);
     PRINT_SYMBOL(DkSegmentRegisterSet);

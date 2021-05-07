@@ -28,18 +28,9 @@ is described in :doc:`../manifest-syntax`.
 Manifest and executable loading
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-To run a program in Graphene properly, the PAL loader generally requires both a
-manifest and an executable. The user shall specify the executable to load in
-the command line, and the PAL loader will try to locate the manifest based on
-the file name.
-
-Precisely, the loading rules for the manifest and executable are as follows:
-
-#. The first argument given to :program:`pal_loader` has to be an executable.
-#. The loader will search for the
-   manifest in the following order: the same file name as the executable with
-   a ``.manifest`` or ``.manifest.sgx`` extension, or ``manifest`` file
-   without any extension.
+To run a program in Graphene the PAL loader needs a manifest, which will
+describe the whole environment inside Graphene namespace. It also describes
+which executable to start first (via ``libos.entrypoint``).
 
 Data types and variables
 ------------------------
@@ -102,11 +93,10 @@ Basic types
 Graphene control block
 ^^^^^^^^^^^^^^^^^^^^^^
 
-The control block in Graphene is a structure that provides static information
-about the current process and its host. It is also a dynamic symbol that will be
-linked by the library OS and resolved at runtime. Sometimes, for the flexibility
-or the convenience of the dynamic resolution, the address of the control block
-may be resolved by a function (:func:`pal_control_addr()`).
+The control block in Graphene is a structure that provides static immutable
+information about the current process and its host. The address of the control
+block is resolved via :func:`DkGetPalControl()` and can be memorized in a global
+variable for ease of use.
 
 The fields of the Graphene control block are defined as follows:
 
@@ -122,14 +112,17 @@ The fields of the Graphene control block are defined as follows:
    :project: pal
    :members:
 
+.. doxygentypedef:: PAL_TOPO_INFO
+   :project: pal
+.. doxygenstruct:: PAL_TOPO_INFO_
+   :project: pal
+   :members:
+
 .. doxygentypedef:: PAL_MEM_INFO
    :project: pal
 .. doxygenstruct:: PAL_MEM_INFO_
    :project: pal
    :members:
-
-.. doxygenfunction:: pal_control_addr
-   :project: pal
 
 Pal APIs
 --------
@@ -251,9 +244,6 @@ applications.
    :project: pal
 
 
-.. doxygendefine:: PAL_STREAM_ERROR
-   :project: pal
-
 Flags used for stream manipulation
 """"""""""""""""""""""""""""""""""
 
@@ -304,7 +294,7 @@ Exception handling
 
 .. doxygentypedef:: PAL_CONTEXT
    :project: pal
-.. doxygenstruct:: PAL_CONTEXT_
+.. doxygenstruct:: PAL_CONTEXT
    :project: pal
    :members:
 
@@ -324,10 +314,7 @@ Synchronization
 .. doxygenfunction:: DkMutexRelease
    :project: pal
 
-.. doxygenfunction:: DkNotificationEventCreate
-   :project: pal
-
-.. doxygenfunction:: DkSynchronizationEventCreate
+.. doxygenfunction:: DkEventCreate
    :project: pal
 
 .. doxygenfunction:: DkEventSet
@@ -360,6 +347,9 @@ increment and decrement the reference counts on objects shared between threads,
 and to obtain an attestation report and quote.
 
 .. doxygenfunction:: DkDebugLog
+   :project: pal
+
+.. doxygenfunction:: DkGetPalControl
    :project: pal
 
 .. doxygenfunction:: DkSystemTimeQuery

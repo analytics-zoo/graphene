@@ -18,7 +18,7 @@
 #include "shim_thread.h"
 #include "shim_utils.h"
 
-typedef long int __fd_mask;
+typedef unsigned long __fd_mask;
 
 #ifndef __NFDBITS
 #define __NFDBITS (8 * (int)sizeof(__fd_mask))
@@ -44,7 +44,7 @@ typedef long int __fd_mask;
 
 #define POLL_NOTIMEOUT ((uint64_t)-1)
 
-static int _shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
+static long _shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
     if ((uint64_t)nfds > get_rlimit_cur(RLIMIT_NOFILE))
         return -EINVAL;
 
@@ -146,7 +146,13 @@ static int _shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
 
     unlock(&map->lock);
 
-    PAL_BOL polled = DkStreamsWaitEvents(pal_cnt, pals, pal_events, ret_events, timeout_us);
+    bool polled = false;
+    long error = 0;
+    if (pal_cnt) {
+        error = DkStreamsWaitEvents(pal_cnt, pals, pal_events, ret_events, timeout_us);
+        polled = error == 0;
+        error = pal_to_unix_errno(error);
+    }
 
     for (nfds_t i = 0; i < nfds; i++) {
         if (!fds_mapping[i].hdl)
@@ -173,11 +179,15 @@ static int _shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
     free(pal_events);
     free(fds_mapping);
 
-    return nrevents;
+    if (error == -EAGAIN) {
+        /* `poll` returns 0 on timeout. */
+        error = 0;
+    }
+    return nrevents ? (long)nrevents : error;
 }
 
 long shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) {
-    if (!fds || test_user_memory(fds, sizeof(*fds) * nfds, true))
+    if (test_user_memory(fds, sizeof(*fds) * nfds, true))
         return -EFAULT;
 
     return _shim_do_poll(fds, nfds, timeout_ms);
@@ -255,7 +265,7 @@ long shim_do_select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* errorfd
     unlock(&map->lock);
 
     uint64_t timeout_ms = tsv ? tsv->tv_sec * 1000ULL + tsv->tv_usec / 1000 : POLL_NOTIMEOUT;
-    int ret = _shim_do_poll(fds_poll, nfds_poll, timeout_ms);
+    long ret = _shim_do_poll(fds_poll, nfds_poll, timeout_ms);
 
     if (ret < 0) {
         free(fds_poll);

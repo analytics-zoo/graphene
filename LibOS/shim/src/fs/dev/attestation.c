@@ -42,10 +42,10 @@ static int init_attestation_struct_sizes(void) {
         return 0;
     }
 
-    bool ok = DkAttestationReport(/*user_report_data=*/NULL, &g_user_report_data_size,
+    int ret = DkAttestationReport(/*user_report_data=*/NULL, &g_user_report_data_size,
                                   /*target_info=*/NULL, &g_target_info_size,
                                   /*report=*/NULL, &g_report_size);
-    if (!ok)
+    if (ret < 0)
         return -EACCES;
 
     assert(g_user_report_data_size && g_user_report_data_size <= sizeof(g_user_report_data));
@@ -88,6 +88,7 @@ static int dev_attestation_readwrite_stat(const char* name, struct stat* buf) {
  * global `g_user_report_data` struct on file close */
 static int user_report_data_modify(struct shim_handle* hdl) {
     assert(g_user_report_data_size);
+    assert(hdl->type == TYPE_STR);
     memcpy(&g_user_report_data, hdl->info.str.data->str, g_user_report_data_size);
     return 0;
 }
@@ -96,6 +97,7 @@ static int user_report_data_modify(struct shim_handle* hdl) {
  * `g_target_info` struct on file close */
 static int target_info_modify(struct shim_handle* hdl) {
     assert(g_target_info_size);
+    assert(hdl->type == TYPE_STR);
     memcpy(&g_target_info, hdl->info.str.data->str, g_target_info_size);
     return 0;
 }
@@ -114,7 +116,7 @@ static int dev_attestation_user_report_data_open(struct shim_handle* hdl, const 
     __UNUSED(name);
     __UNUSED(flags);
 
-    if (strcmp(PAL_CB(host_type), "Linux-SGX")) {
+    if (strcmp(g_pal_control->host_type, "Linux-SGX")) {
         /* this pseudo-file is only available with Linux-SGX */
         return -EACCES;
     }
@@ -158,7 +160,7 @@ static int dev_attestation_target_info_open(struct shim_handle* hdl, const char*
     __UNUSED(name);
     __UNUSED(flags);
 
-    if (strcmp(PAL_CB(host_type), "Linux-SGX")) {
+    if (strcmp(g_pal_control->host_type, "Linux-SGX")) {
         /* this pseudo-file is only available with Linux-SGX */
         return -EACCES;
     }
@@ -207,7 +209,7 @@ static int dev_attestation_my_target_info_open(struct shim_handle* hdl, const ch
     char* target_info          = NULL;
     struct shim_str_data* data = NULL;
 
-    if (strcmp(PAL_CB(host_type), "Linux-SGX")) {
+    if (strcmp(g_pal_control->host_type, "Linux-SGX")) {
         /* this pseudo-file is only available with Linux-SGX */
         return -EACCES;
     }
@@ -236,9 +238,9 @@ static int dev_attestation_my_target_info_open(struct shim_handle* hdl, const ch
 
     /* below invocation returns this enclave's target info because we zeroed out (via calloc)
      * target_info: it's a hint to function to update target_info with this enclave's info */
-    bool ok = DkAttestationReport(user_report_data, &user_report_data_size, target_info,
-                                  &target_info_size, /*report=*/NULL, &report_size);
-    if (!ok) {
+    ret = DkAttestationReport(user_report_data, &user_report_data_size, target_info,
+                              &target_info_size, /*report=*/NULL, &report_size);
+    if (ret < 0) {
         ret = -EACCES;
         goto out;
     }
@@ -292,7 +294,7 @@ static int dev_attestation_report_open(struct shim_handle* hdl, const char* name
     struct shim_str_data* data = NULL;
     char* data_str_report      = NULL;
 
-    if (strcmp(PAL_CB(host_type), "Linux-SGX")) {
+    if (strcmp(g_pal_control->host_type, "Linux-SGX")) {
         /* this pseudo-file is only available with Linux-SGX */
         return -EACCES;
     }
@@ -309,9 +311,9 @@ static int dev_attestation_report_open(struct shim_handle* hdl, const char* name
         goto out;
     }
 
-    bool ok = DkAttestationReport(&g_user_report_data, &g_user_report_data_size, &g_target_info,
-                                  &g_target_info_size, report, &g_report_size);
-    if (!ok) {
+    ret = DkAttestationReport(&g_user_report_data, &g_user_report_data_size, &g_target_info,
+                              &g_target_info_size, report, &g_report_size);
+    if (ret < 0) {
         ret = -EACCES;
         goto out;
     }
@@ -371,7 +373,7 @@ static int dev_attestation_quote_open(struct shim_handle* hdl, const char* name,
     char* data_str_quote       = NULL;
     struct shim_str_data* data = NULL;
 
-    if (strcmp(PAL_CB(host_type), "Linux-SGX")) {
+    if (strcmp(g_pal_control->host_type, "Linux-SGX")) {
         /* this pseudo-file is only available with Linux-SGX */
         return -EACCES;
     }
@@ -389,8 +391,8 @@ static int dev_attestation_quote_open(struct shim_handle* hdl, const char* name,
         goto out;
     }
 
-    bool ok = DkAttestationQuote(&g_user_report_data, g_user_report_data_size, quote, &quote_size);
-    if (!ok) {
+    ret = DkAttestationQuote(&g_user_report_data, g_user_report_data_size, quote, &quote_size);
+    if (ret < 0) {
         ret = -EACCES;
         goto out;
     }
@@ -431,11 +433,15 @@ out:
 /* callback for str FS; copies contents of `/dev/attestation/protected_files_key` file in the
  * global `g_pf_key_hex` string on file close and applies new PF key */
 static int pfkey_modify(struct shim_handle* hdl) {
+    assert(hdl->type == TYPE_STR);
     memcpy(&g_pf_key_hex, hdl->info.str.data->str, sizeof(g_pf_key_hex));
     g_pf_key_hex[sizeof(g_pf_key_hex) - 1] = '\0';
 
-    bool ok = DkSetProtectedFilesKey(&g_pf_key_hex);
-    return ok ? 0 : -EACCES;
+    int ret = DkSetProtectedFilesKey(&g_pf_key_hex);
+    if (ret < 0) {
+        ret = -EACCES;
+    }
+    return ret;
 }
 
 /*!
@@ -451,7 +457,7 @@ static int dev_attestation_pfkey_open(struct shim_handle* hdl, const char* name,
     __UNUSED(name);
     __UNUSED(flags);
 
-    if (strcmp(PAL_CB(host_type), "Linux-SGX")) {
+    if (strcmp(g_pal_control->host_type, "Linux-SGX")) {
         /* this pseudo-file is only available with Linux-SGX */
         return -EACCES;
     }

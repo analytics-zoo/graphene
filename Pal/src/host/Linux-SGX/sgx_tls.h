@@ -2,6 +2,8 @@
 #define __SGX_TLS_H__
 
 #include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 #include "pal.h"
 
@@ -25,7 +27,7 @@ struct enclave_tls {
     /* private to Linux-SGX PAL */
     uint64_t enclave_size;
     uint64_t tcs_offset;
-    uint64_t initial_stack_offset;
+    uint64_t initial_stack_addr;
     uint64_t tmp_rip;
     uint64_t sig_stack_low;
     uint64_t sig_stack_high;
@@ -44,8 +46,6 @@ struct enclave_tls {
     uint64_t manifest_size;
     void*    heap_min;
     void*    heap_max;
-    void*    exec_addr;
-    uint64_t exec_size;
     int*     clear_child_tid;
     struct untrusted_area untrusted_area_cache;
 };
@@ -97,6 +97,7 @@ typedef struct pal_tcb_urts {
     sgx_arch_tcs_t* tcs;           /* TCS page of SGX corresponding to thread, for EENTER */
     void* stack;                   /* bottom of stack, for later freeing when thread exits */
     void* alt_stack;               /* bottom of alt stack, for child thread to init alt stack */
+    uint8_t is_in_aex_profiling;   /* non-zero if thread is currently doing AEX profiling */
     atomic_ulong eenter_cnt;       /* # of EENTERs, corresponds to # of ECALLs */
     atomic_ulong eexit_cnt;        /* # of EEXITs, corresponds to # of OCALLs */
     atomic_ulong aex_cnt;          /* # of AEXs, corresponds to # of interrupts/signals */

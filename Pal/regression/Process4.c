@@ -1,6 +1,6 @@
 #include "api.h"
 #include "pal.h"
-#include "pal_debug.h"
+#include "pal_regression.h"
 
 int main(int argc, char** argv) {
     int count = 0;
@@ -12,15 +12,20 @@ int main(int argc, char** argv) {
     pal_printf("\n");
 
     if (argc == 1) {
-        uint64_t time = DkSystemTimeQuery();
+        uint64_t time = 0;
+        if (DkSystemTimeQuery(&time) < 0) {
+            pal_printf("DkSystemTimeQuery failed\n");
+            return 1;
+        }
         char time_arg[24];
         snprintf(time_arg, 24, "%ld", time);
 
         const char* newargs[4] = {"Process4", "0", time_arg, NULL};
 
-        PAL_HANDLE proc = DkProcessCreate("file:Process4", newargs);
+        PAL_HANDLE proc = NULL;
+        int ret = DkProcessCreate("file:Process4", newargs, &proc);
 
-        if (!proc)
+        if (ret < 0)
             pal_printf("Can't create process\n");
 
         DkObjectClose(proc);
@@ -31,18 +36,23 @@ int main(int argc, char** argv) {
         if (count < 100) {
             count++;
 
-            char count_arg[8];
-            snprintf(count_arg, 8, "%d", count);
+            char count_arg[12];
+            snprintf(count_arg, 12, "%d", count);
             const char* newargs[4] = {"Process4", count_arg, argv[2], NULL};
 
-            PAL_HANDLE proc = DkProcessCreate("file:Process4", newargs);
+            PAL_HANDLE proc = NULL;
+            int ret = DkProcessCreate("file:Process4", newargs, &proc);
 
-            if (!proc)
+            if (ret < 0)
                 pal_printf("Can't create process\n");
 
             DkObjectClose(proc);
         } else {
-            uint64_t end   = DkSystemTimeQuery();
+            uint64_t end = 0;
+            if (DkSystemTimeQuery(&end) < 0) {
+                pal_printf("DkSystemTimeQuery failed\n");
+                return 1;
+            }
             uint64_t start = atol(argv[2]);
             pal_printf("wall time = %ld\n", end - start);
         }

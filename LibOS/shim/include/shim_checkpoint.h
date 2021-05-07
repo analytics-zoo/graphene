@@ -19,7 +19,7 @@
 
 #define __attribute_migratable __attribute__((section(".migratable")))
 
-extern char __migratable;
+extern char __migratable[];
 extern char __migratable_end;
 
 /* FIXME: Checkpointing must be de-macroed and simplified */
@@ -100,8 +100,8 @@ typedef int (*cp_func)(CP_FUNC_ARGS);
 typedef int (*rs_func)(RS_FUNC_ARGS);
 
 extern const char* __cp_name;
-extern const cp_func __cp_func;
-extern const rs_func __rs_func;
+extern const cp_func __cp_func; // TODO: This should be declared as an array of unspecified size.
+extern const rs_func __rs_func[];
 
 enum {
     CP_NULL = 0,
@@ -296,7 +296,7 @@ struct shim_cp_map_entry* get_cp_map_entry(void* map, void* addr, bool create);
 
 #if DEBUG_RESUME == 1
 #define DEBUG_RS(fmt, ...) \
-    debug("GET %s(0x%08lx): " fmt "\n", CP_FUNC_NAME, entry->cp_val, ##__VA_ARGS__)
+    log_debug("GET %s(0x%08lx): " fmt "\n", CP_FUNC_NAME, entry->cp_val, ##__VA_ARGS__)
 #else
 #define DEBUG_RS(...) do {} while (0)
 #endif
@@ -313,7 +313,7 @@ struct shim_cp_map_entry* get_cp_map_entry(void* map, void* addr, bool create);
             if (ret < 0)                                                   \
                 goto out;                                                  \
                                                                            \
-            debug("complete checkpointing data\n");                        \
+            log_debug("complete checkpointing data\n");                    \
         out:                                                               \
             destroy_cp_map((store)->cp_map);                               \
         } while (0);                                                       \
@@ -333,15 +333,14 @@ struct checkpoint_hdr {
 };
 
 typedef int (*migrate_func_t)(struct shim_cp_store*, struct shim_process*, struct shim_thread*,
-                              struct shim_process_ipc_info*, va_list);
+                              struct shim_ipc_cp_data*, va_list);
 
 /*!
  * \brief Create child process and migrate state to it.
  *
- * Called in parent process during fork/clone/execve.
+ * Called in parent process during fork/clone.
  *
  * \param migrate_func          Migration function defined by the caller.
- * \param exec                  Executable to load in the child process.
  * \param child_process         Struct bookkeeping the child process, added to the children list.
  * \param process_description   Struct describing the new process (child).
  * \param thread_description    Struct describing main thread of the child process.
@@ -350,7 +349,7 @@ typedef int (*migrate_func_t)(struct shim_cp_store*, struct shim_process*, struc
  *
  * \return  0 on success, negative POSIX error code on failure.
  */
-int create_process_and_send_checkpoint(migrate_func_t migrate_func, struct shim_handle* exec,
+int create_process_and_send_checkpoint(migrate_func_t migrate_func,
                                        struct shim_child_process* child_process,
                                        struct shim_process* process_description,
                                        struct shim_thread* thread_description, ...);

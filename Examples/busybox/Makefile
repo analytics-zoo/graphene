@@ -21,16 +21,16 @@ BUSYBOX_URL ?= https://busybox.net/downloads/busybox-1.32.0.tar.bz2
 BUSYBOX_SHA256 ?= c35d87f1d04b2b153d33c275c2632e40d388a88f19a9e71727e0bbbff51fe689
 
 ifeq ($(DEBUG),1)
-GRAPHENEDEBUG = inline
+GRAPHENE_LOG_LEVEL = debug
 else
-GRAPHENEDEBUG = none
+GRAPHENE_LOG_LEVEL = error
 endif
 
 
 .PHONY: all
-all: busybox busybox.manifest pal_loader
+all: busybox busybox.manifest
 ifeq ($(SGX),1)
-all: busybox.manifest.sgx
+all: busybox.manifest.sgx busybox.sig busybox.token
 endif
 
 include ../../Scripts/Makefile.configs
@@ -68,48 +68,43 @@ $(SRCDIR)/busybox: $(SRCDIR)/.config
 # non-SGX Graphene) by simply replacing variables in the template file via sed.
 
 busybox.manifest: busybox.manifest.template
-	sed -e 's|$$(GRAPHENEDIR)|'"$(GRAPHENEDIR)"'|g' \
-		-e 's|$$(GRAPHENEDEBUG)|'"$(GRAPHENEDEBUG)"'|g' \
-		-e 's|$$(ARCH_LIBDIR)|'"$(ARCH_LIBDIR)"'|g' \
+	graphene-manifest \
+		-Dlog_level=$(GRAPHENE_LOG_LEVEL) \
+		-Darch_libdir=$(ARCH_LIBDIR) \
 		$< > $@
 
-# Manifest for Graphene-SGX requires special "pal-sgx-sign" procedure. This
-# procedure measures all Busybox dependencies (shared libraries and trusted
-# files), measures Busybox code/data pages, and adds measurements into the
-# resulting manifest.sgx file (among other, less important SGX options).
+# Manifest for Graphene-SGX requires special "pal-sgx-sign" procedure. This procedure measures all
+# Busybox trusted files, adds the measurement to the resulting manifest.sgx file (among other,
+# less important SGX options) and creates busybox.sig (SIGSTRUCT object).
 #
-# Additionally, Graphene-SGX requires EINITTOKEN and SIGSTRUCT objects (see
-# SGX hardware ABI, in particular EINIT instruction). The "pal-sgx-get-token"
-# script generates these objects and puts them in files .token and .sig
-# respectively. Note that filenames must be the same as the executable/manifest
-# name (i.e., "busybox").
+# Graphene-SGX requires EINITTOKEN and SIGSTRUCT objects (see SGX hardware ABI, in particular EINIT
+# instruction). The "pal-sgx-get-token" script generates EINITTOKEN based on a SIGSTRUCT and puts it
+# in .token file. Note that filenames must be the same as the manifest name (i.e., "busybox").
+# EINITTOKEN must be generated on the machine where the application will run, not where it was
+# built.
+
 
 busybox.manifest.sgx: busybox.manifest busybox
-	$(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/pal-sgx-sign \
-		-libpal $(GRAPHENEDIR)/Runtime/libpal-Linux-SGX.so \
-		-key $(SGX_SIGNER_KEY) \
-		-manifest $< -output $@ \
-		-exec busybox
-	$(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/pal-sgx-get-token \
-		-output busybox.token -sig busybox.sig
+	graphene-sgx-sign \
+		--key $(SGX_SIGNER_KEY) \
+		--manifest $< \
+		--output $@
+	graphene-sgx-get-token \
+		--output busybox.token --sig busybox.sig
 
 ########################### COPIES OF EXECUTABLES #############################
 
 # Busybox build process creates the final executable as "src/busybox".
-# Copy Busybox binary to our root directory and create a link to pal_loader for
-# simplicity.
+# Copy Busybox binary to our root directory for simplicity.
 
 busybox: $(SRCDIR)/busybox
 	cp $(SRCDIR)/busybox busybox
-
-pal_loader:
-	ln -s $(GRAPHENEDIR)/Runtime/pal_loader $@
 
 ################################## CLEANUP ####################################
 
 .PHONY: clean
 clean:
-	$(RM) *.token *.sig *.manifest.sgx *.manifest pal_loader busybox
+	$(RM) *.token *.sig *.manifest.sgx *.manifest busybox
 
 .PHONY: distclean
 distclean: clean
