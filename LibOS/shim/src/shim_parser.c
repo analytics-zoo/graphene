@@ -63,7 +63,6 @@ static void parse_integer_arg(struct print_buf*, va_list* ap);
 static void parse_pointer_ret(struct print_buf*, va_list* ap);
 
 struct parser_table {
-<<<<<<< HEAD
     int slow;
     int stop;
     void (*parser[6])(va_list*);
@@ -231,274 +230,6 @@ struct parser_table {
         [__NR_pivot_root] = {.slow = 0, .parser = {NULL}},
         [__NR__sysctl]    = {.slow = 0, .parser = {NULL}},
         [__NR_prctl]      = {.slow = 0, .parser = {NULL}},
-=======
-    /* True if this syscall can block (in such case debug info will be printed both before and after
-     * the syscall). */
-    bool slow;
-    /* Name of the syscall */
-    const char* name;
-    /* Array of parsers; first for the return value, possibly followed by 6 for arguments. Parsing
-     * stops at first `NULL` (or when all 6 argument parsers are used, whichever happens first). */
-    void (*parser[7])(struct print_buf*, va_list*);
-} syscall_parser_table[LIBOS_SYSCALL_BOUND] = {
-    [__NR_read] = {.slow = true, .name = "read", .parser = {parse_long_arg, parse_integer_arg,
-                   parse_pointer_arg, parse_pointer_arg}},
-    [__NR_write] = {.slow = true, .name = "write", .parser = {parse_long_arg, parse_integer_arg,
-                    parse_pointer_arg, parse_pointer_arg}},
-    [__NR_open] = {.slow = true, .name = "open", .parser = {parse_long_arg, parse_string_arg,
-                   parse_open_flags, parse_open_mode}},
-    [__NR_close] = {.slow = false, .name = "close", .parser = {parse_long_arg, parse_integer_arg}},
-    [__NR_stat] = {.slow = false, .name = "stat", .parser = {parse_long_arg, parse_string_arg,
-                   parse_pointer_arg}},
-    [__NR_fstat] = {.slow = false, .name = "fstat", .parser = {parse_long_arg, parse_integer_arg,
-                    parse_pointer_arg}},
-    [__NR_lstat] = {.slow = false, .name = "lstat", .parser = {parse_long_arg, parse_string_arg,
-                    parse_pointer_arg}},
-    [__NR_poll] = {.slow = true, .name = "poll", .parser = {parse_long_arg, parse_pointer_arg,
-                   parse_integer_arg, parse_integer_arg}},
-    [__NR_lseek] = {.slow = false, .name = "lseek", .parser = {parse_long_arg, parse_integer_arg,
-                    parse_long_arg, parse_seek}},
-    [__NR_mmap] = {.slow = true, .name = "mmap", .parser = {parse_pointer_ret, parse_pointer_arg,
-                   parse_pointer_arg, parse_mmap_prot, parse_mmap_flags, parse_integer_arg,
-                   parse_long_arg}},
-    [__NR_mprotect] = {.slow = true, .name = "mprotect", .parser = {parse_long_arg,
-                       parse_pointer_arg, parse_pointer_arg, parse_mmap_prot}},
-    [__NR_munmap] = {.slow = true, .name = "munmap", .parser = {parse_long_arg, parse_pointer_arg,
-                     parse_pointer_arg}},
-    [__NR_brk] = {.slow = false, .name = "brk", .parser = {parse_pointer_ret, parse_pointer_arg}},
-    [__NR_rt_sigaction] = {.slow = false, .name = "rt_sigaction", .parser = {parse_long_arg,
-                           parse_signum, parse_pointer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_rt_sigprocmask] = {.slow = false, .name = "rt_sigprocmask", .parser = {parse_long_arg,
-                             parse_sigprocmask_how, parse_sigmask, parse_sigmask,
-                             parse_pointer_arg}},
-    [__NR_rt_sigreturn] = {.slow = false, .name = "rt_sigreturn", .parser = {NULL}},
-    [__NR_ioctl] = {.slow = true, .name = "ioctl", .parser = {parse_long_arg, parse_integer_arg,
-                    parse_ioctlop, parse_pointer_arg}},
-    [__NR_pread64] = {.slow = true, .name = "pread64", .parser = {parse_long_arg, parse_integer_arg,
-                      parse_pointer_arg, parse_pointer_arg, parse_long_arg}},
-    [__NR_pwrite64] = {.slow = false, .name = "pwrite64", .parser = {parse_long_arg,
-                       parse_integer_arg, parse_pointer_arg, parse_pointer_arg, parse_long_arg}},
-    [__NR_readv] = {.slow = true, .name = "readv", .parser = {parse_long_arg, parse_integer_arg,
-                    parse_pointer_arg, parse_integer_arg}},
-    [__NR_writev] = {.slow = false, .name = "writev", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_pointer_arg, parse_integer_arg}},
-    [__NR_access] = {.slow = false, .name = "access", .parser = {parse_long_arg, parse_string_arg,
-                     parse_access_mode}},
-    [__NR_pipe] = {.slow = false, .name = "pipe", .parser = {parse_long_arg, parse_pipe_fds}},
-    [__NR_select] = {.slow = true, .name = "select", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_pointer_arg, parse_pointer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_sched_yield] = {.slow = false, .name = "sched_yield", .parser = {parse_long_arg}},
-    [__NR_mremap] = {.slow = false, .name = "mremap", .parser = {NULL}},
-    [__NR_msync] = {.slow = false, .name = "msync", .parser = {NULL}},
-    [__NR_mincore] = {.slow = false, .name = "mincore", .parser = {parse_long_arg,
-                      parse_pointer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_madvise] = {.slow = false, .name = "madvise", .parser = {parse_long_arg,
-                      parse_pointer_arg, parse_pointer_arg, parse_madvise_behavior}},
-    [__NR_shmget] = {.slow = false, .name = "shmget", .parser = {NULL}},
-    [__NR_shmat] = {.slow = false, .name = "shmat", .parser = {NULL}},
-    [__NR_shmctl] = {.slow = false, .name = "shmctl", .parser = {NULL}},
-    [__NR_dup] = {.slow = false, .name = "dup", .parser = {parse_long_arg, parse_integer_arg}},
-    [__NR_dup2] = {.slow = false, .name = "dup2", .parser = {parse_long_arg, parse_integer_arg,
-                   parse_integer_arg}},
-    [__NR_pause] = {.slow = true, .name = "pause", .parser = {parse_long_arg}},
-    [__NR_nanosleep] = {.slow = true, .name = "nanosleep", .parser = {parse_long_arg,
-                        parse_timespec, parse_pointer_arg}},
-    [__NR_getitimer] = {.slow = false, .name = "getitimer", .parser = {parse_long_arg,
-                        parse_integer_arg, parse_pointer_arg}},
-    [__NR_alarm] = {.slow = false, .name = "alarm", .parser = {parse_long_arg, parse_integer_arg}},
-    [__NR_setitimer] = {.slow = false, .name = "setitimer", .parser = {parse_long_arg,
-                        parse_integer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_getpid] = {.slow = false, .name = "getpid", .parser = {parse_long_arg}},
-    [__NR_sendfile] = {.slow = false, .name = "sendfile", .parser = {parse_long_arg,
-                       parse_integer_arg, parse_integer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_socket] = {.slow = false, .name = "socket", .parser = {parse_long_arg, parse_domain,
-                     parse_socktype, parse_integer_arg}},
-    [__NR_connect] = {.slow = true, .name = "connect", .parser = {parse_long_arg, parse_integer_arg,
-                      parse_sockaddr, parse_integer_arg}},
-    [__NR_accept] = {.slow = true, .name = "accept", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_pointer_arg, parse_pointer_arg}},
-    [__NR_sendto] = {.slow = false, .name = "sendto", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_pointer_arg, parse_pointer_arg, parse_integer_arg, parse_pointer_arg,
-                     parse_integer_arg}},
-    [__NR_recvfrom] = {.slow = false, .name = "recvfrom", .parser = {parse_long_arg,
-                       parse_integer_arg, parse_pointer_arg, parse_pointer_arg, parse_integer_arg,
-                       parse_pointer_arg, parse_pointer_arg}},
-    [__NR_sendmsg] = {.slow = false, .name = "sendmsg", .parser = {parse_long_arg,
-                      parse_integer_arg, parse_pointer_arg, parse_integer_arg}},
-    [__NR_recvmsg] = {.slow = true, .name = "recvmsg", .parser = {parse_long_arg, parse_integer_arg,
-                      parse_pointer_arg, parse_integer_arg}},
-    [__NR_shutdown] = {.slow = false, .name = "shutdown", .parser = {parse_long_arg,
-                       parse_integer_arg, parse_integer_arg}},
-    [__NR_bind] = {.slow = false, .name = "bind", .parser = {parse_long_arg, parse_integer_arg,
-                   parse_pointer_arg, parse_integer_arg}},
-    [__NR_listen] = {.slow = false, .name = "listen", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_integer_arg}},
-    [__NR_getsockname] = {.slow = false, .name = "getsockname", .parser = {parse_long_arg,
-                          parse_integer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_getpeername] = {.slow = false, .name = "getpeername", .parser = {parse_long_arg,
-                          parse_integer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_socketpair] = {.slow = false, .name = "socketpair", .parser = {parse_long_arg,
-                         parse_domain, parse_socktype, parse_integer_arg, parse_pipe_fds}},
-    [__NR_setsockopt] = {.slow = false, .name = "setsockopt", .parser = {parse_long_arg,
-                         parse_integer_arg, parse_integer_arg, parse_integer_arg, parse_pointer_arg,
-                         parse_integer_arg}},
-    [__NR_getsockopt] = {.slow = false, .name = "getsockopt", .parser = {parse_long_arg,
-                         parse_integer_arg, parse_integer_arg, parse_integer_arg, parse_pointer_arg,
-                         parse_pointer_arg}},
-    [__NR_clone] = {.slow = true, .name = "clone", .parser = {parse_long_arg, parse_clone_flags,
-                    parse_pointer_arg, parse_pointer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_fork] = {.slow = true, .name = "fork", .parser = {parse_long_arg}},
-    [__NR_vfork] = {.slow = true, .name = "vfork", .parser = {parse_long_arg}},
-    [__NR_execve] = {.slow = true, .name = "execve", .parser = {parse_long_arg, parse_string_arg,
-                     parse_exec_args, parse_exec_envp}},
-    [__NR_exit] = {.slow = false, .name = "exit", .parser = {parse_long_arg, parse_integer_arg}},
-    [__NR_wait4] = {.slow = true, .name = "wait4", .parser = {parse_long_arg, parse_integer_arg,
-                    parse_pointer_arg, parse_wait_options, parse_pointer_arg}},
-    [__NR_kill] = {.slow = false, .name = "kill", .parser = {parse_long_arg, parse_integer_arg,
-                   parse_signum}},
-    [__NR_uname] = {.slow = false, .name = "uname", .parser = {parse_long_arg, parse_pointer_arg}},
-    [__NR_semget] = {.slow = false, .name = "semget", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_integer_arg, parse_integer_arg}},
-    [__NR_semop] = {.slow = true, .name = "semop", .parser = {parse_long_arg, parse_integer_arg,
-                    parse_pointer_arg, parse_integer_arg}},
-    [__NR_semctl] = {.slow = false, .name = "semctl", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_integer_arg, parse_integer_arg, parse_pointer_arg}},
-    [__NR_shmdt] = {.slow = false, .name = "shmdt", .parser = {NULL}},
-    [__NR_msgget] = {.slow = true, .name = "msgget", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_integer_arg}},
-    [__NR_msgsnd] = {.slow = true, .name = "msgsnd", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_pointer_arg, parse_pointer_arg, parse_integer_arg}},
-    [__NR_msgrcv] = {.slow = true, .name = "msgrcv", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_pointer_arg, parse_pointer_arg, parse_long_arg, parse_integer_arg}},
-    [__NR_msgctl] = {.slow = true, .name = "msgctl", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_integer_arg, parse_pointer_arg}},
-    [__NR_fcntl] = {.slow = false, .name = "fcntl", .parser = {parse_long_arg, parse_integer_arg,
-                    parse_fcntlop, parse_pointer_arg}},
-    [__NR_flock] = {.slow = false, .name = "flock", .parser = {NULL}},
-    [__NR_fsync] = {.slow = false, .name = "fsync", .parser = {parse_long_arg, parse_integer_arg}},
-    [__NR_fdatasync] = {.slow = false, .name = "fdatasync", .parser = {parse_long_arg,
-                        parse_integer_arg}},
-    [__NR_truncate] = {.slow = false, .name = "truncate", .parser = {parse_long_arg,
-                       parse_string_arg, parse_long_arg}},
-    [__NR_ftruncate] = {.slow = false, .name = "ftruncate", .parser = {parse_long_arg,
-                        parse_integer_arg, parse_long_arg}},
-    [__NR_getdents] = {.slow = false, .name = "getdents", .parser = {parse_long_arg,
-                       parse_integer_arg, parse_pointer_arg, parse_pointer_arg}},
-    [__NR_getcwd] = {.slow = false, .name = "getcwd", .parser = {parse_long_arg, parse_pointer_arg,
-                     parse_pointer_arg}},
-    [__NR_chdir] = {.slow = false, .name = "chdir", .parser = {parse_long_arg, parse_string_arg}},
-    [__NR_fchdir] = {.slow = false, .name = "fchdir", .parser = {parse_long_arg,
-                     parse_integer_arg}},
-    [__NR_rename] = {.slow = false, .name = "rename", .parser = {parse_long_arg, parse_string_arg,
-                     parse_string_arg}},
-    [__NR_mkdir] = {.slow = false, .name = "mkdir", .parser = {parse_long_arg, parse_string_arg,
-                    parse_integer_arg}},
-    [__NR_rmdir] = {.slow = false, .name = "rmdir", .parser = {parse_long_arg, parse_string_arg}},
-    [__NR_creat] = {.slow = false, .name = "creat", .parser = {parse_long_arg, parse_string_arg,
-                    parse_open_mode}},
-    [__NR_link] = {.slow = false, .name = "link", .parser = {NULL}},
-    [__NR_unlink] = {.slow = false, .name = "unlink", .parser = {parse_long_arg, parse_string_arg}},
-    [__NR_symlink] = {.slow = false, .name = "symlink", .parser = {NULL}},
-    [__NR_readlink] = {.slow = false, .name = "readlink", .parser = {parse_long_arg,
-                       parse_string_arg, parse_pointer_arg, parse_integer_arg}},
-    [__NR_chmod] = {.slow = false, .name = "chmod", .parser = {parse_long_arg, parse_string_arg,
-                    parse_integer_arg}},
-    [__NR_fchmod] = {.slow = false, .name = "fchmod", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_integer_arg}},
-    [__NR_chown] = {.slow = false, .name = "chown", .parser = {parse_long_arg, parse_string_arg,
-                    parse_integer_arg, parse_integer_arg}},
-    [__NR_fchown] = {.slow = false, .name = "fchown", .parser = {parse_long_arg, parse_integer_arg,
-                     parse_integer_arg, parse_integer_arg}},
-    [__NR_lchown] = {.slow = false, .name = "lchown", .parser = {NULL}},
-    [__NR_umask] = {.slow = false, .name = "umask", .parser = {parse_long_arg, parse_integer_arg}},
-    [__NR_gettimeofday] = {.slow = false, .name = "gettimeofday", .parser = {parse_long_arg,
-                           parse_pointer_arg, parse_pointer_arg}},
-    [__NR_getrlimit] = {.slow = false, .name = "getrlimit", .parser = {parse_long_arg,
-                        parse_integer_arg, parse_pointer_arg}},
-    [__NR_getrusage] = {.slow = false, .name = "getrusage", .parser = {NULL}},
-    [__NR_sysinfo] = {.slow = false, .name = "sysinfo", .parser = {NULL}},
-    [__NR_times] = {.slow = false, .name = "times", .parser = {NULL}},
-    [__NR_ptrace] = {.slow = false, .name = "ptrace", .parser = {NULL}},
-    [__NR_getuid] = {.slow = false, .name = "getuid", .parser = {parse_long_arg}},
-    [__NR_syslog] = {.slow = false, .name = "syslog", .parser = {NULL}},
-    [__NR_getgid] = {.slow = false, .name = "getgid", .parser = {parse_long_arg}},
-    [__NR_setuid] = {.slow = false, .name = "setuid", .parser = {parse_long_arg,
-                     parse_integer_arg}},
-    [__NR_setgid] = {.slow = false, .name = "setgid", .parser = {parse_long_arg,
-                     parse_integer_arg}},
-    [__NR_geteuid] = {.slow = false, .name = "geteuid", .parser = {parse_long_arg}},
-    [__NR_getegid] = {.slow = false, .name = "getegid", .parser = {parse_long_arg}},
-    [__NR_setpgid] = {.slow = false, .name = "setpgid", .parser = {parse_long_arg,
-                      parse_integer_arg, parse_integer_arg}},
-    [__NR_getppid] = {.slow = false, .name = "getppid", .parser = {parse_long_arg}},
-    [__NR_getpgrp] = {.slow = false, .name = "getpgrp", .parser = {parse_long_arg}},
-    [__NR_setsid] = {.slow = false, .name = "setsid", .parser = {parse_long_arg}},
-    [__NR_setreuid] = {.slow = false, .name = "setreuid", .parser = {NULL}},
-    [__NR_setregid] = {.slow = false, .name = "setregid", .parser = {NULL}},
-    [__NR_getgroups] = {.slow = false, .name = "getgroups", .parser = {parse_long_arg,
-                        parse_integer_arg, parse_pointer_arg}},
-    [__NR_setgroups] = {.slow = false, .name = "setgroups", .parser = {parse_long_arg,
-                        parse_integer_arg, parse_pointer_arg}},
-    [__NR_setresuid] = {.slow = false, .name = "setresuid", .parser = {NULL}},
-    [__NR_getresuid] = {.slow = false, .name = "getresuid", .parser = {NULL}},
-    [__NR_setresgid] = {.slow = false, .name = "setresgid", .parser = {NULL}},
-    [__NR_getresgid] = {.slow = false, .name = "getresgid", .parser = {NULL}},
-    [__NR_getpgid] = {.slow = false, .name = "getpgid", .parser = {parse_long_arg,
-                      parse_integer_arg}},
-    [__NR_setfsuid] = {.slow = false, .name = "setfsuid", .parser = {NULL}},
-    [__NR_setfsgid] = {.slow = false, .name = "setfsgid", .parser = {NULL}},
-    [__NR_getsid] = {.slow = false, .name = "getsid", .parser = {parse_long_arg,
-                     parse_integer_arg}},
-    [__NR_capget] = {.slow = false, .name = "capget", .parser = {NULL}},
-    [__NR_capset] = {.slow = false, .name = "capset", .parser = {NULL}},
-    [__NR_rt_sigpending] = {.slow = false, .name = "rt_sigpending", .parser = {parse_long_arg,
-                            parse_pointer_arg, parse_pointer_arg}},
-    [__NR_rt_sigtimedwait] = {.slow = false, .name = "rt_sigtimedwait", .parser = {NULL}},
-    [__NR_rt_sigqueueinfo] = {.slow = false, .name = "rt_sigqueueinfo", .parser = {NULL}},
-    [__NR_rt_sigsuspend] = {.slow = true, .name = "rt_sigsuspend", .parser = {parse_long_arg,
-                            parse_pointer_arg, parse_pointer_arg}},
-    [__NR_sigaltstack] = {.slow = false, .name = "sigaltstack", .parser = {parse_long_arg,
-                          parse_pointer_arg, parse_pointer_arg}},
-    [__NR_utime] = {.slow = false, .name = "utime", .parser = {NULL}},
-    [__NR_mknod] = {.slow = false, .name = "mknod", .parser = {parse_long_arg, parse_string_arg,
-                    parse_open_mode, parse_integer_arg}},
-    [__NR_uselib] = {.slow = false, .name = "uselib", .parser = {NULL}},
-    [__NR_personality] = {.slow = false, .name = "personality", .parser = {NULL}},
-    [__NR_ustat] = {.slow = false, .name = "ustat", .parser = {NULL}},
-    [__NR_statfs] = {.slow = false, .name = "statfs", .parser = {parse_long_arg, parse_string_arg,
-                     parse_pointer_arg}},
-    [__NR_fstatfs] = {.slow = false, .name = "fstatfs", .parser = {parse_long_arg,
-                      parse_integer_arg, parse_pointer_arg}},
-    [__NR_sysfs] = {.slow = false, .name = "sysfs", .parser = {NULL}},
-    [__NR_getpriority] = {.slow = false, .name = "getpriority", .parser = {parse_long_arg,
-                          parse_integer_arg, parse_integer_arg}},
-    [__NR_setpriority] = {.slow = false, .name = "setpriority", .parser = {parse_long_arg,
-                          parse_integer_arg, parse_integer_arg, parse_integer_arg}},
-    [__NR_sched_setparam] = {.slow = false, .name = "sched_setparam", .parser = {parse_long_arg,
-                             parse_integer_arg, parse_pointer_arg}},
-    [__NR_sched_getparam] = {.slow = false, .name = "sched_getparam", .parser = {parse_long_arg,
-                             parse_integer_arg, parse_pointer_arg}},
-    [__NR_sched_setscheduler] = {.slow = false, .name = "sched_setscheduler", .parser =
-                                 {parse_long_arg, parse_integer_arg, parse_integer_arg,
-                                 parse_pointer_arg}},
-    [__NR_sched_getscheduler] = {.slow = false, .name = "sched_getscheduler", .parser =
-                                 {parse_long_arg, parse_integer_arg}},
-    [__NR_sched_get_priority_max] = {.slow = false, .name = "sched_get_priority_max", .parser =
-                                     {parse_long_arg, parse_integer_arg}},
-    [__NR_sched_get_priority_min] = {.slow = false, .name = "sched_get_priority_min", .parser =
-                                     {parse_long_arg, parse_integer_arg}},
-    [__NR_sched_rr_get_interval] = {.slow = false, .name = "sched_rr_get_interval", .parser =
-                                    {parse_long_arg, parse_integer_arg, parse_pointer_arg}},
-    [__NR_mlock] = {.slow = false, .name = "mlock", .parser = {NULL}},
-    [__NR_munlock] = {.slow = false, .name = "munlock", .parser = {NULL}},
-    [__NR_mlockall] = {.slow = false, .name = "mlockall", .parser = {NULL}},
-    [__NR_munlockall] = {.slow = false, .name = "munlockall", .parser = {NULL}},
-    [__NR_vhangup] = {.slow = false, .name = "vhangup", .parser = {NULL}},
-    [__NR_modify_ldt] = {.slow = false, .name = "modify_ldt", .parser = {NULL}},
-    [__NR_pivot_root] = {.slow = false, .name = "pivot_root", .parser = {NULL}},
-    [__NR__sysctl] = {.slow = false, .name = "_sysctl", .parser = {NULL}},
-    [__NR_prctl] = {.slow = false, .name = "prctl", .parser = {NULL}},
->>>>>>> upstream/master
 #ifdef __NR_arch_prctl
     [__NR_arch_prctl] = {.slow = false, .name = "arch_prctl", .parser = {parse_long_arg,
                          parse_integer_arg, parse_pointer_arg}},
@@ -1710,6 +1441,7 @@ static void print_syscall_name(struct print_buf* buf, const char* name, unsigned
     }
 }
 
+<<<<<<< HEAD
 void warn_unsupported_syscall(unsigned long sysno) {
     if (sysno < ARRAY_SIZE(syscall_parser_table) && syscall_parser_table[sysno].name)
         log_warning("Unsupported system call %s\n", syscall_parser_table[sysno].name);
@@ -1729,6 +1461,12 @@ static int buf_write_all(const char* str, size_t size, void* arg) {
 
 void debug_print_syscall_before(unsigned long sysno, ...) {
     if (g_log_level < PAL_LOG_TRACE)
+=======
+static uint64_t init_time = 0;
+
+void debug_print_syscall_before(int sysno, ...) {
+    if (g_log_level < PAL_LOG_INFO)
+>>>>>>> origin/branch-0.2
         return;
 
     struct parser_table* parser = &syscall_parser_table[sysno];
@@ -1741,9 +1479,21 @@ void debug_print_syscall_before(unsigned long sysno, ...) {
     va_list ap;
     va_start(ap, sysno);
 
+<<<<<<< HEAD
     buf_puts(&buf, "---- ");
     print_syscall_name(&buf, parser->name, sysno);
     buf_puts(&buf, "(");
+=======
+    PUTS("---- ");
+
+    if(!init_time)
+        init_time = DkSystemTimeQuery()/1000;
+
+    PRINTF("---- start time: %lu ms ", DkSystemTimeQuery()/1000- init_time);
+
+    print_syscall_name(parser->name, sysno);
+    PUTS("(");
+>>>>>>> origin/branch-0.2
 
     for (int i = 0; i < 6; i++) {
         if (parser->parser[i + 1]) {
@@ -1776,9 +1526,16 @@ void debug_print_syscall_after(unsigned long sysno, ...) {
     va_arg(ap, long);
 
     if (parser->slow) {
+<<<<<<< HEAD
         buf_puts(&buf, "---- return from ");
         print_syscall_name(&buf, parser->name, sysno);
         buf_puts(&buf, "(...");
+=======
+	PRINTF("---- end time: %lu ms ",  DkSystemTimeQuery()/1000 - init_time);
+        PUTS("return from ");
+        print_syscall_name(parser->name, sysno);
+        PUTS("(...");
+>>>>>>> origin/branch-0.2
     } else {
         buf_puts(&buf, "---- ");
         print_syscall_name(&buf, parser->name, sysno);
