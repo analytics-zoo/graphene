@@ -285,22 +285,13 @@ static int tcp_listen(PAL_HANDLE* handle, char* uri, int create, int options) {
     int ipv6_v6only = create & PAL_CREATE_DUALSTACK ? 0 : 1;
     ret = ocall_listen(bind_addr->sa_family, sock_type(SOCK_STREAM, options), 0, ipv6_v6only,
                        bind_addr, &bind_addrlen, &sock_options);
-<<<<<<< HEAD
-    if (IS_ERR(ret))
-    {
-<<<<<<< HEAD
-	pal_printf("@@@@@ocall_listen ERRNO = %d\n", ret);
-        return unix_to_pal_error(ERRNO(ret));
-    }
-=======
+
     if (ret < 0)
-        return unix_to_pal_error(ret);
->>>>>>> upstream/master
-=======
-	//pal_printf("@@@@@ocall_listen ERRNO = %d\n", ret);
+	    pal_printf("@@@@@ocall_listen ERRNO = %d\n", ret);
+
         return unix_to_pal_error(ERRNO(ret));
     }
->>>>>>> origin/branch-0.2
+
 
     *handle = socket_create_handle(pal_type_tcpsrv, ret, options, bind_addr, bind_addrlen, NULL, 0,
                                    &sock_options);
@@ -404,11 +395,8 @@ static int tcp_open(PAL_HANDLE* handle, const char* type, const char* uri, int a
     assert(WITHIN_MASK(share,   PAL_SHARE_MASK));
     assert(WITHIN_MASK(create,  PAL_CREATE_MASK));
     assert(WITHIN_MASK(options, PAL_OPTION_MASK));
-<<<<<<< HEAD
+
     pal_printf("@@@@@Enter tcp_open type = %s\n", type);
-=======
-    //pal_printf("@@@@@Enter tcp_open type = %s\n", type);
->>>>>>> origin/branch-0.2
 
     size_t uri_len = strlen(uri) + 1;
 
@@ -476,11 +464,7 @@ static int udp_bind(PAL_HANDLE* handle, char* uri, int create, int options) {
     struct sockaddr* bind_addr = (struct sockaddr*)&buffer;
     size_t bind_addrlen = sizeof(buffer);
     int ret = 0;
-<<<<<<< HEAD
     pal_printf("@@@@@Enter udp_bind uri = %s\n", uri);
-=======
-    //pal_printf("@@@@@Enter udp_bind uri = %s\n", uri);
->>>>>>> origin/branch-0.2
 
     if ((ret = socket_parse_uri(uri, &bind_addr, &bind_addrlen, NULL, NULL)) < 0)
         return ret;
@@ -496,22 +480,14 @@ static int udp_bind(PAL_HANDLE* handle, char* uri, int create, int options) {
     int ipv6_v6only = create & PAL_CREATE_DUALSTACK ? 0 : 1;
     ret = ocall_listen(bind_addr->sa_family, sock_type(SOCK_DGRAM, options), 0, ipv6_v6only,
                        bind_addr, &bind_addrlen, &sock_options);
-<<<<<<< HEAD
-    if (IS_ERR(ret))
-    {
-<<<<<<< HEAD
-	pal_printf("@@@@@ocall_listen ERRNO = %d\n", ret);
-        return unix_to_pal_error(ERRNO(ret));
-    }
-=======
+
     if (ret < 0)
-        return unix_to_pal_error(ret);
->>>>>>> upstream/master
-=======
-	//pal_printf("@@@@@ocall_listen ERRNO = %d\n", ret);
+
+
+	    pal_printf("@@@@@ocall_listen ERRNO = %d\n", ret);
         return unix_to_pal_error(ERRNO(ret));
     }
->>>>>>> origin/branch-0.2
+
 
     *handle = socket_create_handle(pal_type_udpsrv, ret, options, bind_addr, bind_addrlen, NULL, 0,
                                    &sock_options);
@@ -573,11 +549,7 @@ static int udp_open(PAL_HANDLE* hdl, const char* type, const char* uri, int acce
     char buf[PAL_SOCKADDR_SIZE];
     size_t len = strlen(uri);
 
-<<<<<<< HEAD
     pal_printf("@@@@@Enter udp_open type = %s\n", type);
-=======
-    //pal_printf("@@@@@Enter udp_open type = %s\n", type);
->>>>>>> origin/branch-0.2
     if (len >= PAL_SOCKADDR_SIZE)
         return -PAL_ERROR_TOOLONG;
 
