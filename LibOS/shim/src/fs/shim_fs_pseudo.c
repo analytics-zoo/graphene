@@ -9,6 +9,8 @@
  * This file contains common code for pseudo-filesystems (e.g., /dev and /proc).
  */
 
+#include <stdalign.h>
+
 #include "shim_fs.h"
 #include "stat.h"
 
@@ -92,7 +94,9 @@ static int populate_dirent(const char* path, const struct pseudo_dir* dir, struc
         if (ent->name) {
             /* directory entry has a hardcoded name */
             size_t name_size   = strlen(ent->name) + 1;
-            size_t dirent_size = sizeof(struct shim_dirent) + name_size;
+            /* all directory entries must be aligned on the *dirent::next alignment */
+            size_t dirent_size = ALIGN_UP(sizeof(struct shim_dirent) + name_size,
+                                          alignof(*dirent_in_buf->next));
 
             total_size += dirent_size;
             if (total_size > buf_size)
@@ -169,8 +173,9 @@ int pseudo_dir_open(struct shim_handle* hdl, const char* name, int flags) {
     }
 
     if (*name == '\0') {
-        hdl->type     = TYPE_DIR;
-        hdl->flags    = flags & ~O_ACCMODE;
+        hdl->is_dir = true;
+        hdl->type = TYPE_PSEUDO;
+        hdl->flags = flags & ~O_ACCMODE;
         hdl->acc_mode = 0;
     }
 
@@ -236,8 +241,10 @@ int pseudo_open(struct shim_handle* hdl, struct shim_dentry* dent, int flags,
     if (!ent->fs_ops || !ent->fs_ops->open)
         return -EACCES;
 
-    hdl->type     = ent->dir ? TYPE_DIR : (ent->type == LINUX_DT_CHR ? TYPE_DEV : TYPE_FILE);
-    hdl->flags    = flags & ~O_ACCMODE;
+    hdl->is_dir = !!ent->dir;
+    /* Initialize as an empty TYPE_PSEUDO handle, fs_ops->open may override that */
+    hdl->type = TYPE_PSEUDO;
+    hdl->flags = flags & ~O_ACCMODE;
     hdl->acc_mode = ACC_MODE(flags & O_ACCMODE);
 
     return ent->fs_ops->open(hdl, rel_path, flags);

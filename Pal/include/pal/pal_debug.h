@@ -8,13 +8,17 @@
 #ifndef PAL_DEBUG_H
 #define PAL_DEBUG_H
 
+#include <stdarg.h>
+
 #include "pal.h"
 
-int pal_printf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-int pal_fdprintf(int fd, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+// TODO: Replace this with log_* everywhere
+void pal_printf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void pal_vprintf(const char* fmt, va_list ap) __attribute__((format(printf, 1, 0)));
+
 void warn(const char* format, ...);
 
-void DkDebugAttachBinary(PAL_STR uri, PAL_PTR start_addr);
-void DkDebugDetachBinary(PAL_PTR start_addr);
+void DkDebugMapAdd(PAL_STR uri, PAL_PTR start_addr);
+void DkDebugMapRemove(PAL_PTR start_addr);
 
 #endif /* PAL_DEBUG_H */

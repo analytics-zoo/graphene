@@ -42,10 +42,10 @@ long shim_do_epoll_create1(int flags) {
     if (!hdl)
         return -ENOMEM;
 
-    struct shim_epoll_handle* epoll = &hdl->info.epoll;
-
     hdl->type = TYPE_EPOLL;
     set_handle_fs(hdl, &epoll_builtin_fs);
+
+    struct shim_epoll_handle* epoll = &hdl->info.epoll;
     epoll->fds_count = 0;
     __atomic_store_n(&epoll->waiter_cnt, 0, __ATOMIC_RELAXED);
     INIT_LISTP(&epoll->fds);
@@ -63,7 +63,7 @@ long shim_do_epoll_create1(int flags) {
 
 /* the 'size' argument of epoll_create is not used */
 long shim_do_epoll_create(int size) {
-    if (size < 0)
+    if (size <= 0)
         return -EINVAL;
 
     return shim_do_epoll_create1(0);
@@ -109,7 +109,8 @@ void delete_from_epoll_handles(struct shim_handle* handle) {
 
         /* second, get epoll to which this epoll-item belongs to, and remove epoll-item from
          * epoll's `fds` list */
-        struct shim_handle* hdl         = epoll_item->epoll;
+        struct shim_handle* hdl = epoll_item->epoll;
+        assert(hdl->type == TYPE_EPOLL);
         struct shim_epoll_handle* epoll = &hdl->info.epoll;
 
         lock(&hdl->lock);
@@ -124,6 +125,19 @@ void delete_from_epoll_handles(struct shim_handle* handle) {
     }
 }
 
+void maybe_epoll_et_trigger(struct shim_handle* handle, int ret, bool in, bool was_partial) {
+    if (ret == -EAGAIN || ret == -EWOULDBLOCK || was_partial) {
+        if (in) {
+            __atomic_store_n(&handle->needs_et_poll_in, true, __ATOMIC_RELEASE);
+        } else {
+            __atomic_store_n(&handle->needs_et_poll_out, true, __ATOMIC_RELEASE);
+        }
+        lock(&handle->lock);
+        _update_epolls(handle);
+        unlock(&handle->lock);
+    }
+}
+
 long shim_do_epoll_ctl(int epfd, int op, int fd, struct __kernel_epoll_event* event) {
     struct shim_thread* cur = get_cur_thread();
     int ret = 0;
@@ -132,7 +146,7 @@ long shim_do_epoll_ctl(int epfd, int op, int fd, struct __kernel_epoll_event* ev
         return -EINVAL;
 
     if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD)
-        if (!event || test_user_memory(event, sizeof(*event), false)) {
+        if (test_user_memory(event, sizeof(*event), false)) {
             /* surprisingly, man(epoll_ctl) does not specify EFAULT if event is invalid so
              * we re-use EINVAL; also note that EPOLL_CTL_DEL ignores event completely */
             return -EINVAL;
@@ -146,6 +160,7 @@ long shim_do_epoll_ctl(int epfd, int op, int fd, struct __kernel_epoll_event* ev
         return -EINVAL;
     }
 
+    assert(epoll_hdl->type == TYPE_EPOLL);
     struct shim_epoll_handle* epoll = &epoll_hdl->info.epoll;
     struct shim_epoll_item* epoll_item;
 
@@ -184,13 +199,18 @@ long shim_do_epoll_ctl(int epfd, int op, int fd, struct __kernel_epoll_event* ev
                 goto out;
             }
 
-            debug("add fd %d (handle %p) to epoll handle %p\n", fd, hdl, epoll);
+            log_debug("add fd %d (handle %p) to epoll handle %p\n", fd, hdl, epoll);
             epoll_item->fd        = fd;
             epoll_item->events    = event->events;
             epoll_item->data      = event->data;
             epoll_item->revents   = 0;
             epoll_item->handle    = hdl;
             epoll_item->epoll     = epoll_hdl;
+
+            if (epoll_item->events & EPOLLET) {
+                __atomic_store_n(&hdl->needs_et_poll_in, true, __ATOMIC_RELEASE);
+                __atomic_store_n(&hdl->needs_et_poll_out, true, __ATOMIC_RELEASE);
+            }
 
             /* register hdl (corresponding to FD) in epoll (corresponding to EPFD):
              * - bind hdl to epoll-item via the `back` list
@@ -216,7 +236,13 @@ long shim_do_epoll_ctl(int epfd, int op, int fd, struct __kernel_epoll_event* ev
                     epoll_item->events = event->events;
                     epoll_item->data   = event->data;
 
-                    debug("modified fd %d at epoll handle %p\n", fd, epoll);
+                    if (epoll_item->events & EPOLLET) {
+                        struct shim_handle* handle = epoll_item->handle;
+                        __atomic_store_n(&handle->needs_et_poll_in, true, __ATOMIC_RELEASE);
+                        __atomic_store_n(&handle->needs_et_poll_out, true, __ATOMIC_RELEASE);
+                    }
+
+                    log_debug("modified fd %d at epoll handle %p\n", fd, epoll);
                     notify_epoll_waiters(epoll);
                     goto out;
                 }
@@ -230,7 +256,7 @@ long shim_do_epoll_ctl(int epfd, int op, int fd, struct __kernel_epoll_event* ev
             LISTP_FOR_EACH_ENTRY(epoll_item, &epoll->fds, list) {
                 if (epoll_item->fd == fd) {
                     struct shim_handle* hdl = epoll_item->handle;
-                    debug("delete fd %d (handle %p) from epoll handle %p\n", fd, hdl, epoll);
+                    log_debug("delete fd %d (handle %p) from epoll handle %p\n", fd, hdl, epoll);
 
                     /* unregister hdl (corresponding to FD) in epoll (corresponding to EPFD):
                      * - unbind hdl from epoll-item via the `back` list
@@ -280,6 +306,7 @@ long shim_do_epoll_wait(int epfd, struct __kernel_epoll_event* events, int maxev
         return -EINVAL;
     }
 
+    assert(epoll_hdl->type == TYPE_EPOLL);
     struct shim_epoll_handle* epoll = &epoll_hdl->info.epoll;
 
     lock(&epoll_hdl->lock);
@@ -320,6 +347,16 @@ long shim_do_epoll_wait(int epfd, struct __kernel_epoll_event* events, int maxev
                                    ? PAL_WAIT_WRITE
                                    : 0;
             ret_events[pal_cnt] = 0;
+
+            if (epoll_item->events & EPOLLET) {
+                if (!__atomic_load_n(&epoll_item->handle->needs_et_poll_in, __ATOMIC_ACQUIRE)) {
+                    pal_events[pal_cnt] &= ~PAL_WAIT_READ;
+                }
+                if (!__atomic_load_n(&epoll_item->handle->needs_et_poll_out, __ATOMIC_ACQUIRE)) {
+                    pal_events[pal_cnt] &= ~PAL_WAIT_WRITE;
+                }
+            }
+
             pal_cnt++;
         }
 
@@ -336,8 +373,10 @@ long shim_do_epoll_wait(int epfd, struct __kernel_epoll_event* events, int maxev
         unlock(&epoll_hdl->lock);
 
         /* TODO: Timeout must be updated in case of retries; otherwise, we may wait for too long */
-        PAL_BOL polled = DkStreamsWaitEvents(pal_cnt + 1, pal_handles, pal_events, ret_events,
-                                             timeout_ms * 1000);
+        long error = DkStreamsWaitEvents(pal_cnt + 1, pal_handles, pal_events, ret_events,
+                                         timeout_ms * 1000);
+        bool polled = error == 0;
+        error = pal_to_unix_errno(error);
 
         lock(&epoll_hdl->lock);
         __atomic_sub_fetch(&epoll->waiter_cnt, 1, __ATOMIC_RELAXED);
@@ -372,7 +411,11 @@ long shim_do_epoll_wait(int epfd, struct __kernel_epoll_event* events, int maxev
         free(pal_handles);
         free(pal_events);
 
-        if (event_handle_update) {
+        if (error && error != -EAGAIN) {
+            unlock(&epoll_hdl->lock);
+            put_handle(epoll_hdl);
+            return error;
+        } else if (event_handle_update) {
             /* retry if epoll was updated concurrently (similar to Linux semantics) */
             unlock(&epoll_hdl->lock);
             int ret = wait_event(&epoll->event);
@@ -398,6 +441,12 @@ long shim_do_epoll_wait(int epfd, struct __kernel_epoll_event* events, int maxev
         if (epoll_item->revents & monitored_events) {
             events[nevents].events = epoll_item->revents & monitored_events;
             events[nevents].data   = epoll_item->data;
+            if (events[nevents].events & (EPOLLIN | EPOLLRDNORM)) {
+                __atomic_store_n(&epoll_item->handle->needs_et_poll_in, false, __ATOMIC_RELEASE);
+            }
+            if (events[nevents].events & (EPOLLOUT | EPOLLWRNORM)) {
+                __atomic_store_n(&epoll_item->handle->needs_et_poll_out, false, __ATOMIC_RELEASE);
+            }
             epoll_item->revents &= ~epoll_item->events; /* informed user about revents, may clear */
             nevents++;
         }
@@ -417,6 +466,7 @@ long shim_do_epoll_pwait(int epfd, struct __kernel_epoll_event* events, int maxe
 }
 
 static int epoll_close(struct shim_handle* epoll_hdl) {
+    assert(epoll_hdl->type == TYPE_EPOLL);
     struct shim_epoll_handle* epoll = &epoll_hdl->info.epoll;
     struct shim_epoll_item* epoll_item;
     struct shim_epoll_item* tmp_epoll_item;
@@ -459,7 +509,7 @@ BEGIN_CP_FUNC(epoll_item) {
     LISTP_TYPE(shim_epoll_item)* new_list = (LISTP_TYPE(shim_epoll_item)*)objp;
     struct shim_epoll_item* epoll_item;
 
-    debug("checkpoint epoll: %p -> %p (base = 0x%08lx)\n", old_list, new_list, base);
+    log_debug("checkpoint epoll: %p -> %p (base = 0x%08lx)\n", old_list, new_list, base);
 
     INIT_LISTP(new_list);
 

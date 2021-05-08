@@ -12,6 +12,9 @@
 #error "cannot be included outside PAL"
 #endif
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "atomic.h"
 
 /* Simpler mutex design: a single variable that tracks whether the
@@ -43,7 +46,7 @@ typedef struct mutex_handle {
 /* Locking and unlocking of Mutexes */
 int _DkMutexLock(struct mutex_handle* mut);
 int _DkMutexLockTimeout(struct mutex_handle* mut, int64_t timeout_us);
-int _DkMutexUnlock(struct mutex_handle* mut);
+void _DkMutexUnlock(struct mutex_handle* mut);
 
 typedef struct {
     PAL_HDR hdr;
@@ -142,11 +145,10 @@ typedef struct pal_handle {
 
         struct {
             uint32_t signaled;
-            struct atomic_int nwaiters;
-            PAL_BOL isnotification;
+            bool auto_clear;
         } event;
     };
-} * PAL_HANDLE;
+}* PAL_HANDLE;
 
 #define RFD(n)   (1 << (MAX_FDS * 0 + (n)))
 #define WFD(n)   (1 << (MAX_FDS * 1 + (n)))
@@ -154,17 +156,8 @@ typedef struct pal_handle {
 
 #define HANDLE_TYPE(handle) ((handle)->hdr.type)
 
-extern void __check_pending_event(void);
-
-#define LEAVE_PAL_CALL()         \
-    do {                         \
-        __check_pending_event(); \
-    } while (0)
-
-#define LEAVE_PAL_CALL_RETURN(retval) \
-    do {                              \
-        __check_pending_event();      \
-        return (retval);              \
-    } while (0)
+int arch_do_rt_sigprocmask(int sig, int how);
+int arch_do_rt_sigaction(int sig, void* handler,
+                         const int* async_signals, size_t num_async_signals);
 
 #endif /* PAL_HOST_H */

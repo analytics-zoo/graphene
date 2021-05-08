@@ -2,126 +2,45 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * This file contains utilities to load ELF binaries into the memory and link them against each
- * other. The source code in this file was imported from the GNU C Library and modified.
+ * This file contains host-specific code related to linking and reporting ELFs to debugger.
+ *
+ * Overview of ELF files used in this host:
+ * - libpal.so - used as main executable, so it doesn't need to be reported separately
+ * - LibOS, application, libc... - reported through DkDebugMap*
  */
 
 #include "api.h"
+#include "cpu.h"
+#include "debug_map.h"
 #include "elf-arch.h"
 #include "elf/elf.h"
 #include "pal.h"
 #include "pal_debug.h"
-#include "pal_defs.h"
-#include "pal_error.h"
 #include "pal_internal.h"
 #include "pal_linux.h"
-#include "pal_linux_defs.h"
 #include "pal_rtld.h"
-#include "pal_security.h"
-#include "sysdeps/generic/ldsodefs.h"
 
-/* This function exists solely to have a breakpoint set on it by the debugger. The debugger is
- * supposed to find this function's address by examining the r_brk member of struct r_debug, but GDB
- * 4.15 in fact looks for this particular symbol name in the PT_INTERP file.  */
-static void __attribute__((noinline)) pal_dl_debug_state(void) {
-    if (g_pal_sec._dl_debug_state)
-        g_pal_sec._dl_debug_state();
+static uintptr_t vdso_start = 0;
+static uintptr_t vdso_end = 0;
+
+uintptr_t get_vdso_start(void) {
+    return vdso_start;
 }
 
-extern __typeof(pal_dl_debug_state) _dl_debug_state __attribute((alias("pal_dl_debug_state")));
-
-/* This structure communicates dl state to the debugger.  The debugger normally finds it via the
- * DT_DEBUG entry in the dynamic section, but in a statically-linked program there is no dynamic
- * section for the debugger to examine and it looks for this particular symbol name.  */
-struct r_debug g_pal_r_debug = {1, NULL, (ElfW(Addr))&pal_dl_debug_state, RT_CONSISTENT, 0};
-symbol_version_default(g_pal_r_debug, _r_debug, PAL);
-
-void _DkDebugAddMap(struct link_map* map) {
-#ifdef DEBUG
-    struct r_debug* dbg = g_pal_sec._r_debug ?: &g_pal_r_debug;
-    int len = map->l_name ? strlen(map->l_name) + 1 : 0;
-
-    struct link_map** prev = &dbg->r_map;
-    struct link_map* last = NULL;
-    struct link_map* tmp = *prev;
-    while (tmp) {
-        if (tmp->l_addr == map->l_addr && tmp->l_ld == map->l_ld &&
-                !memcmp(tmp->l_name, map->l_name, len))
-            return;
-
-        last = tmp;
-        tmp = *(prev = &last->l_next);
-    }
-
-    struct link_gdb_map* m = malloc(sizeof(struct link_gdb_map) + len);
-    if (!m)
-        return;
-
-    if (len) {
-        m->l_name = (char*)m + sizeof(struct link_gdb_map);
-        memcpy((void*)m->l_name, map->l_name, len);
-    } else {
-        m->l_name = NULL;
-    }
-
-    m->l_addr = map->l_addr;
-    m->l_ld   = map->l_real_ld;
-
-    dbg->r_state = RT_ADD;
-    pal_dl_debug_state();
-
-    *prev = (struct link_map*)m;
-    m->l_prev = last;
-    m->l_next = NULL;
-
-    dbg->r_state = RT_CONSISTENT;
-    pal_dl_debug_state();
-#else
-    __UNUSED(map);
-#endif
+bool is_in_vdso(uintptr_t addr) {
+    return (vdso_start || vdso_end) && vdso_start <= addr && addr < vdso_end;
 }
 
-void _DkDebugDelMap(struct link_map* map) {
-#ifdef DEBUG
-    struct r_debug* dbg = g_pal_sec._r_debug ?: &g_pal_r_debug;
-    int len = map->l_name ? strlen(map->l_name) + 1 : 0;
+void _DkDebugMapAdd(const char* name, void* addr) {
+    int ret = debug_map_add(name, addr);
+    if (ret < 0)
+        log_error("debug_map_add(%s, %p) failed: %d\n", name, addr, ret);
+}
 
-    struct link_map** prev = &dbg->r_map;
-    struct link_map* last = NULL;
-    struct link_map* tmp = *prev;
-    struct link_map* found = NULL;
-    while (tmp) {
-        if (tmp->l_addr == map->l_addr && tmp->l_ld == map->l_ld &&
-                !memcmp(tmp->l_name, map->l_name, len)) {
-            found = tmp;
-            break;
-        }
-
-        last = tmp;
-        tmp = *(prev = &last->l_next);
-    }
-
-    if (!found)
-        return;
-
-    dbg->r_state = RT_DELETE;
-    pal_dl_debug_state();
-
-    if (last)
-        last->l_next = tmp->l_next;
-    else
-        dbg->r_map = tmp->l_next;
-
-    if (tmp->l_next)
-        tmp->l_next->l_prev = last;
-
-    free(tmp);
-
-    dbg->r_state = RT_CONSISTENT;
-    pal_dl_debug_state();
-#else
-    __UNUSED(map);
-#endif
+void _DkDebugMapRemove(void* addr) {
+    int ret = debug_map_remove(addr);
+    if (ret < 0)
+        log_error("debug_map_remove(%p) failed: %d\n", addr, ret);
 }
 
 void setup_pal_map(struct link_map* pal_map) {
@@ -134,7 +53,6 @@ void setup_pal_map(struct link_map* pal_map) {
     pal_map->l_phnum   = header->e_phnum;
     setup_elf_hash(pal_map);
 
-    _DkDebugAddMap(pal_map);
     pal_map->l_prev = pal_map->l_next = NULL;
     g_loaded_maps = pal_map;
 }
@@ -153,16 +71,28 @@ void setup_vdso_map(ElfW(Addr) addr) {
 
     ElfW(Addr) load_offset = 0;
     const ElfW(Phdr) * ph;
+    unsigned long pt_loads_count = 0;
     for (ph = vdso_map.l_phdr; ph < &vdso_map.l_phdr[vdso_map.l_phnum]; ph++)
         switch (ph->p_type) {
             case PT_LOAD:
                 load_offset = addr + (ElfW(Addr))ph->p_offset - (ElfW(Addr))ph->p_vaddr;
+                vdso_start = (uintptr_t)addr;
+                vdso_end = ALIGN_UP(vdso_start + (size_t)ph->p_memsz, PAGE_SIZE);
+                pt_loads_count++;
                 break;
             case PT_DYNAMIC:
                 vdso_map.l_real_ld = vdso_map.l_ld = (void*)addr + ph->p_offset;
                 vdso_map.l_ldnum = ph->p_memsz / sizeof(ElfW(Dyn));
                 break;
         }
+
+    if (pt_loads_count != 1) {
+        log_warning("The VDSO has %lu PT_LOAD segments, but only 1 was expected.\n",
+                    pt_loads_count);
+        vdso_start = 0;
+        vdso_end = 0;
+        return;
+    }
 
     ElfW(Dyn) local_dyn[4];
     int ndyn = 0;
@@ -198,4 +128,10 @@ void setup_vdso_map(ElfW(Addr) addr) {
     sym = do_lookup_map(NULL, gettime, fast_hash, hash, &vdso_map);
     if (sym)
         g_linux_state.vdso_clock_gettime = (void*)(load_offset + sym->st_value);
+
+    if (vdso_start || vdso_end) {
+        /* vDSO occupies some memory region, need to inform the LibOS so it reflects it in VMAs */
+        g_pal_control.vdso_preload.start = (PAL_PTR)vdso_start;
+        g_pal_control.vdso_preload.end   = (PAL_PTR)vdso_end;
+    }
 }

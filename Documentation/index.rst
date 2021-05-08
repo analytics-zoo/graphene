@@ -47,6 +47,7 @@ Table of Contents
    quickstart
    building
    manifest-syntax
+   attestation
    cloud-deployment
    sgx-intro
    glossary
@@ -69,6 +70,7 @@ Table of Contents
    :maxdepth: 1
 
    devel/contributing
+   devel/DCO/index
    devel/howto-doc
    devel/coding-style
    devel/setup
@@ -76,6 +78,7 @@ Table of Contents
    devel/benchmarks
    devel/performance
    devel/new-syscall
+   devel/packaging
 
 .. toctree::
    :caption: LibOS

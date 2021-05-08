@@ -9,85 +9,53 @@
 #
 # Use `make clean` to remove Graphene-generated files.
 
-GRAPHENEDIR ?= ../..
-SGX_SIGNER_KEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
-PYTHON3 ?= /usr/bin/python3
-
-ifeq ($(DEBUG),1)
-GRAPHENEDEBUG = inline
-else
-GRAPHENEDEBUG = none
-endif
-
-DISTRIB_ID ?= $(shell lsb_release --short --id)
-DISTRIB_RELEASE ?= $(shell lsb_release --short --release)
-
-ifeq ($(SGX), 1)
-ifneq ($(DISTRIB_ID),Ubuntu)
-$(error This example requires Ubuntu when building for SGX.)
-endif
-endif
-
-UBUNTU_VERSION = $(DISTRIB_ID)$(DISTRIB_RELEASE)
-
-.PHONY: all
-all: python3.manifest python3_child.manifest | python3 python3_child pal_loader
-ifeq ($(SGX),1)
-all: python3.token python3_child.token
-endif
 
 include ../../Scripts/Makefile.configs
 
-python3.sig: python3_child.sig
+GRAPHENEDIR ?= ../..
+SGX_SIGNER_KEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
 
-# .manifest.template contains stanzas for both Ubuntu 16 and 18. The last rule selectively enables
-# those lines based on the Ubuntu version detected.
+ifeq ($(DEBUG),1)
+GRAPHENE_LOG_LEVEL = debug
+else
+GRAPHENE_LOG_LEVEL = error
+endif
+
+.PHONY: all
+all: pytorch.manifest
+ifeq ($(SGX),1)
+all: pytorch.manifest.sgx pytorch.sig pytorch.token
+endif
+
 %.manifest: %.manifest.template
-	sed -e 's|$$(GRAPHENEDIR)|'"$(GRAPHENEDIR)"'|g' \
-		-e 's|$$(GRAPHENEDEBUG)|'"$(GRAPHENEDEBUG)"'|g' \
-		-e 's|$$(HOME)|'"$(HOME)"'|g' \
-		-e 's|# '"$(UBUNTU_VERSION)"' ||g' \
-		-e 's|$$(ARCH_LIBDIR)|'"$(ARCH_LIBDIR)"'|g' \
+	graphene-manifest \
+		-Dlog_level=$(GRAPHENE_LOG_LEVEL) \
+		-Darch_libdir=$(ARCH_LIBDIR) \
+		-Dentrypoint=$(realpath $(shell sh -c "command -v python3")) \
 		$< > $@
 
-python3.sig: python3.manifest | python3
-	$(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/pal-sgx-sign \
-		-exec python3 \
-		-libpal $(GRAPHENEDIR)/Runtime/libpal-Linux-SGX.so \
-		-key $(SGX_SIGNER_KEY) \
-		-output python3.manifest.sgx \
-		-manifest python3.manifest
+# Make on Ubuntu <= 20.04 doesn't support "Rules with Grouped Targets" (`&:`),
+# we need to hack around.
+pytorch.sig pytorch.manifest.sgx: sgx_outputs
+	@:
+
+.INTERMEDIATE: sgx_outputs
+sgx_outputs: pytorch.manifest
+	graphene-sgx-sign \
+		--key $(SGX_SIGNER_KEY) \
+		--output pytorch.manifest.sgx \
+		--manifest pytorch.manifest
 
 %.token: %.sig
-	$(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/pal-sgx-get-token -output $@ -sig $<
-
-# The PyTorch workload forks/execve()s at some point. Having two manifests is a workaround until
-# Graphene fixes its loader.
-python3_child.manifest: python3.manifest
-	cp $< $@
-	sed -i '/trusted_children/d' $@
-
-python3_child.sig: python3_child python3_child.manifest
-	$(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/pal-sgx-sign \
-		-exec python3 \
-		-libpal $(GRAPHENEDIR)/Runtime/libpal-Linux-SGX.so \
-		-key $(SGX_SIGNER_KEY) \
-		-output python3_child.manifest.sgx \
-		-manifest python3_child.manifest
-
-python3 python3_child:
-	ln -s $(PYTHON3) $@
-
-pal_loader:
-	ln -s $(GRAPHENEDIR)/Runtime/pal_loader $@
+	graphene-sgx-get-token --output $@ --sig $<
 
 .PHONY: download_model
 download_model:
-	$(PYTHON3) download-pretrained-model.py
+	$(PYTHONEXEC) download-pretrained-model.py
 
 .PHONY: clean
 clean:
-	$(RM) *.token *.sig *.manifest.sgx *.manifest python3 python3_child pal_loader
+	$(RM) *.token *.sig *.manifest.sgx *.manifest
 
 .PHONY: distclean
 distclean: clean

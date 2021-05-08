@@ -14,6 +14,7 @@
 #include "pal.h"
 #include "pal_crypto.h"
 #include "pal_defs.h"
+#include "pal_internal.h"
 #include "pal_linux_defs.h"
 #include "protected_files.h"
 #include "sgx_api.h"
@@ -21,11 +22,8 @@
 #include "sgx_attest.h"
 #include "sgx_tls.h"
 #include "sysdep-arch.h"
-#include "uthash.h"
 
-#define IS_ERR      INTERNAL_SYSCALL_ERROR
 #define IS_ERR_P    INTERNAL_SYSCALL_ERROR_P
-#define ERRNO       INTERNAL_SYSCALL_ERRNO
 #define ERRNO_P     INTERNAL_SYSCALL_ERRNO_P
 #define IS_UNIX_ERR INTERNAL_SYSCALL_ERRNO_RANGE
 
@@ -75,10 +73,7 @@ int _DkMutexAtomicCreate(struct mutex_handle* mut);
 int __DkMutexDestroy(struct mutex_handle* mut);
 int _DkMutexLock(struct mutex_handle* mut);
 int _DkMutexLockTimeout(struct mutex_handle* mut, int64_t timeout_us);
-int _DkMutexUnlock(struct mutex_handle* mut);
-
-int* get_futex(void);
-void free_futex(int* futex);
+void _DkMutexUnlock(struct mutex_handle* mut);
 
 extern char __text_start, __text_end, __data_start, __data_end;
 #define TEXT_START ((void*)(&__text_start))
@@ -87,11 +82,11 @@ extern char __text_start, __text_end, __data_start, __data_end;
 #define DATA_END   ((void*)(&__text_end))
 
 typedef struct {
-    char bytes[32];
-} sgx_checksum_t;
+    uint8_t bytes[32];
+} sgx_file_hash_t;
 typedef struct {
-    char bytes[16];
-} sgx_stub_t;
+    uint8_t bytes[16];
+} sgx_chunk_hash_t;
 
 extern int g_xsave_enabled;
 extern uint64_t g_xsave_features;
@@ -115,20 +110,19 @@ bool is_tsc_usable(void);
 uint64_t get_tsc_hz(void);
 void init_tsc(void);
 
-/* Function: load_trusted_file
- * checks if the file to be opened is trusted or allowed,
- * according to the setting in manifest
+/*!
+ * \brief check if the file to be opened is trusted or allowed, according to the manifest
  *
- * file:     file handle to be opened
- * stubptr:  buffer for catching matched file stub.
- * sizeptr:  size pointer
- * create:   this file is newly created or not
+ * \param file              file handle to be opened
+ * \param chunk_hashes_ptr  array of hashes over file chunks
+ * \param size_ptr          returns size of opened file
+ * \param create            whether this file is newly created
+ * \param umem              untrusted memory address at which the file is loaded
  *
- * return:  0 succeed
+ * \return 0 on success, negative error code on failure
  */
-
-int load_trusted_file(PAL_HANDLE file, sgx_stub_t** stubptr, uint64_t* sizeptr, int create,
-                      void** umem);
+int load_trusted_file(PAL_HANDLE file, sgx_chunk_hash_t** chunk_hashes_ptr, uint64_t* size_ptr,
+                      int create, void** umem);
 
 enum {
     FILE_CHECK_POLICY_STRICT = 0,
@@ -139,16 +133,36 @@ int init_file_check_policy(void);
 
 int get_file_check_policy(void);
 
-int copy_and_verify_trusted_file(const char* path, const void* umem, uint64_t umem_start,
-                                 uint64_t umem_end, void* buffer, uint64_t offset, uint64_t size,
-                                 sgx_stub_t* stubs, uint64_t total_size);
+/*!
+ * \brief Copy and check file contents from untrusted outside buffer to in-enclave buffer
+ *
+ * \param path            file path (currently only for a log message)
+ * \param buf             in-enclave buffer where contents of the file are copied
+ * \param umem            start of untrusted file memory mapped outside the enclave
+ * \param aligned_offset  offset into file contents to copy, aligned to TRUSTED_CHUNK_SIZE
+ * \param aligned_end     end of file contents to copy, aligned to TRUSTED_CHUNK_SIZE
+ * \param offset          unaligned offset into file contents to copy
+ * \param end             unaligned end of file contents to copy
+ * \param chunk_hashes    array of hashes of all file chunks
+ * \param file_size       total size of the file
+ *
+ * \return 0 on success, negative error code on failure
+ *
+ * If needed, regions at either the beginning or the end of the copied regions are copied into a
+ * scratch buffer to avoid a TOCTTOU race. This is done to avoid the following TOCTTOU race
+ * condition with the untrusted host as an adversary:
+ *       *  Adversary: put good contents in buffer
+ *       *  Enclave: buffer check passes
+ *       *  Adversary: put bad contents in buffer
+ *       *  Enclave: copies in bad buffer contents
+ */
+int copy_and_verify_trusted_file(const char* path, uint8_t* buf, const void* umem,
+                                 off_t aligned_offset, off_t aligned_end, off_t offset, off_t end,
+                                 sgx_chunk_hash_t* chunk_hashes, size_t file_size);
 
-int init_trusted_children(void);
 int register_trusted_child(const char* uri, const char* mr_enclave_str);
 
 int init_enclave(void);
-int init_enclave_key(void);
-
 void init_untrusted_slab_mgr(void);
 
 /* Used to track map buffers for protected files */
@@ -256,7 +270,7 @@ int sgx_verify_report(sgx_report_t* report);
 int sgx_get_report(const sgx_target_info_t* target_info, const sgx_report_data_t* data,
                    sgx_report_t* report);
 
-typedef int (*check_mr_enclave_t)(PAL_HANDLE, sgx_measurement_t*, struct pal_enclave_state*);
+typedef bool (*mr_enclave_check_t)(PAL_HANDLE, sgx_measurement_t*, struct pal_enclave_state*);
 
 /*
  * _DkStreamReportRequest, _DkStreamReportRespond:
@@ -264,12 +278,12 @@ typedef int (*check_mr_enclave_t)(PAL_HANDLE, sgx_measurement_t*, struct pal_enc
  *
  * @stream:           stream handle for sending and receiving messages
  * @data:             data to sign in the outbound message
- * @check_mr_enclave: callback function for checking the measurement of the other end
+ * @is_mr_enclave_ok: callback function for checking the measurement of the other end
  */
 int _DkStreamReportRequest(PAL_HANDLE stream, sgx_sign_data_t* data,
-                           check_mr_enclave_t check_mr_enclave);
+                           mr_enclave_check_t is_mr_enclave_ok);
 int _DkStreamReportRespond(PAL_HANDLE stream, sgx_sign_data_t* data,
-                           check_mr_enclave_t check_mr_enclave);
+                           mr_enclave_check_t is_mr_enclave_ok);
 
 int _DkStreamSecureInit(PAL_HANDLE stream, bool is_server, PAL_SESSION_KEY* session_key,
                         LIB_SSL_CONTEXT** out_ssl_ctx, const uint8_t* buf_load_ssl_ctx,
@@ -305,42 +319,6 @@ int sgx_create_process(const char* uri, size_t nargs, const char** args, int* st
 #endif
 
 #endif /* IN_ENCLAVE */
-
-#define DBG_E 0x01
-#define DBG_I 0x02
-#define DBG_D 0x04
-#define DBG_S 0x08
-#define DBG_P 0x10
-#define DBG_M 0x20
-
-#ifdef DEBUG
-#define DBG_LEVEL (DBG_E | DBG_I | DBG_D | DBG_S)
-#else
-#define DBG_LEVEL DBG_E
-#endif
-
-#ifdef IN_ENCLAVE
-#undef uthash_fatal
-#define uthash_fatal(msg)                \
-    do {                                 \
-        __UNUSED(msg);                   \
-        DkProcessExit(-PAL_ERROR_NOMEM); \
-    } while (0)
-
-#define SGX_DBG(class, fmt...)   \
-    do {                         \
-        if ((class) & DBG_LEVEL) \
-            printf(fmt);         \
-    } while (0)
-#else
-#include "pal_debug.h"
-
-#define SGX_DBG(class, fmt...)   \
-    do {                         \
-        if ((class) & DBG_LEVEL) \
-            pal_printf(fmt);     \
-    } while (0)
-#endif
 
 #ifndef IN_ENCLAVE
 int clone(int (*__fn)(void* __arg), void* __child_stack, int __flags, const void* __arg, ...);

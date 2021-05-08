@@ -30,15 +30,11 @@
 #define MSGQ_HASH_MASK (MSGQ_HASH_NUM - 1)
 #define MSGQ_HASH(idx) ((idx) & MSGQ_HASH_MASK)
 
-/* The msgq_list links shim_msg_handle objects by the list field.
- * The msgq_key_hlist links them by key_hlist, and qid_hlist by qid_hlist */
+/* The msgq_key_hlist links them by key_hlist, and qid_hlist by qid_hlist */
 DEFINE_LISTP(shim_msg_handle);
-static LISTP_TYPE(shim_msg_handle) msgq_list;
 static LISTP_TYPE(shim_msg_handle) msgq_key_hlist[MSGQ_HASH_NUM];
 static LISTP_TYPE(shim_msg_handle) msgq_qid_hlist[MSGQ_HASH_NUM];
 static struct shim_lock msgq_list_lock;
-
-static int __store_msg_persist(struct shim_msg_handle* msgq);
 
 #define MSG_TO_HANDLE(msghdl) container_of((msghdl), struct shim_handle, info.msg)
 
@@ -79,15 +75,20 @@ static int __add_msg_handle(unsigned long key, IDTYPE msqid, bool owned,
     if (!hdl)
         return -ENOMEM;
 
+    hdl->type = TYPE_MSG;
+
     struct shim_msg_handle* msgq = &hdl->info.msg;
 
-    hdl->type         = TYPE_MSG;
     msgq->msqkey      = key;
     msgq->msqid       = msqid;
     msgq->owned       = owned;
     msgq->deleted     = false;
     msgq->currentsize = 0;
-    msgq->event       = DkSynchronizationEventCreate(PAL_FALSE);
+    int ret = DkEventCreate(&msgq->event, /*init_signaled=*/false, /*auto_clear=*/true);
+    if (ret < 0) {
+        // Needs some cleanup, but this function is broken anyway...
+        return pal_to_unix_errno(ret);
+    }
 
     msgq->queue     = malloc(MSG_QOBJ_SIZE * DEFAULT_MSG_QUEUE_SIZE);
     msgq->queuesize = DEFAULT_MSG_QUEUE_SIZE;
@@ -97,10 +98,6 @@ static int __add_msg_handle(unsigned long key, IDTYPE msqid, bool owned,
     msgq->ntypes   = 0;
     msgq->maxtypes = INIT_MSG_TYPE_SIZE;
     msgq->types    = malloc(sizeof(struct msg_type) * INIT_MSG_TYPE_SIZE);
-
-    INIT_LIST_HEAD(msgq, list);
-    get_handle(hdl);
-    LISTP_ADD_TAIL(msgq, &msgq_list, list);
 
     INIT_LIST_HEAD(msgq, key_hlist);
     if (key_head) {
@@ -224,8 +221,6 @@ static int __del_msg_handle(struct shim_msg_handle* msgq) {
     msgq->ntypes = 0;
 
     lock(&msgq_list_lock);
-    LISTP_DEL_INIT(msgq, &msgq_list, list);
-    put_handle(hdl);
     if (!LIST_EMPTY(msgq, key_hlist)) {
         // DEP: Yuck, re-find the head; maybe we can do better...
         LISTP_TYPE(shim_msg_handle)* key_head = &msgq_key_hlist[MSGQ_HASH(msgq->msqkey)];
@@ -613,10 +608,7 @@ int get_sysv_msg(struct shim_msg_handle* msgq, long type, size_t size, void* dat
 
     if (!msgq->owned) {
         if (src) {
-            struct shim_ipc_info* owner = msgq->owner;
-            ret = owner ? ipc_sysv_movres_send(src, owner->vmid, qstrgetstr(&owner->uri),
-                                               msgq->msqid, SYSV_MSGQ)
-                        : -ECONNREFUSED;
+            ret = -ECONNREFUSED;
             goto out_locked;
         }
 
@@ -672,111 +664,4 @@ out_locked:
     unlock(&hdl->lock);
 out:
     return ret;
-}
-
-static int __store_msg_persist(struct shim_msg_handle* msgq) {
-    int ret = 0;
-
-    if (msgq->deleted)
-        goto out;
-
-    debug("store msgq %d to persistent store\n", msgq->msqid);
-
-    char fileuri[20];
-    snprintf(fileuri, 20, URI_PREFIX_FILE "msgq.%08x", msgq->msqid);
-
-    PAL_HANDLE file = DkStreamOpen(fileuri, PAL_ACCESS_RDWR, PERM_rw_______, PAL_CREATE_TRY, 0);
-    if (!file) {
-        ret = -PAL_ERRNO();
-        goto out;
-    }
-
-    int expected_size = sizeof(struct msg_handle_backup) + sizeof(struct msg_backup) * msgq->nmsgs +
-                        msgq->currentsize;
-
-    if (DkStreamSetLength(file, expected_size))
-        goto err_file;
-
-    void* mem = (void*)DkStreamMap(file, NULL, PAL_PROT_READ | PAL_PROT_WRITE, 0,
-                                   ALLOC_ALIGN_UP(expected_size));
-    if (!mem) {
-        ret = -EFAULT;
-        goto err_file;
-    }
-
-    struct msg_handle_backup* mback = mem;
-    mem += sizeof(struct msg_handle_backup);
-
-    mback->perm        = msgq->perm;
-    mback->nmsgs       = msgq->nmsgs;
-    mback->currentsize = msgq->currentsize;
-
-    struct msg_type* mtype;
-    for (mtype = msgq->types; mtype < &msgq->types[msgq->ntypes]; mtype++) {
-        while (mtype->msgs) {
-            struct msg_backup* msg = mem;
-            mem += sizeof(struct msg_backup) + mtype->msgs->size;
-
-            msg->type = mtype->type;
-            msg->size = mtype->msgs->size;
-            __load_msg_qobjs(msgq, mtype, mtype->msgs, msg->data);
-        }
-
-        mtype->msgs = mtype->msg_tail = NULL;
-    }
-
-    DkStreamUnmap(mem, ALLOC_ALIGN_UP(expected_size));
-
-    if (msgq->owned)
-        for (mtype = msgq->types; mtype < &msgq->types[msgq->ntypes]; mtype++) {
-            struct msg_req* req = mtype->reqs;
-            mtype->reqs = mtype->req_tail = NULL;
-            while (req) {
-                struct sysv_client* c = &req->dest;
-                struct msg_req* next  = req->next;
-
-                send_response_ipc_message(c->port, c->vmid, -EIDRM, c->seq);
-
-                put_ipc_port(c->port);
-                __free_msg_qobj(msgq, req);
-                req = next;
-            }
-        }
-
-    msgq->owned = false;
-    ret = 0;
-    goto out;
-
-err_file:
-    DkStreamDelete(file, 0);
-    DkObjectClose(file);
-
-out:
-    // To wake up any receiver waiting on local message which must
-    // now be requested from new owner.
-    DkEventSet(msgq->event);
-    return ret;
-}
-
-int store_all_msg_persist(void) {
-    struct shim_msg_handle* msgq;
-    struct shim_msg_handle* n;
-
-    if (!create_lock_runtime(&msgq_list_lock)) {
-        return -ENOMEM;
-    }
-
-    lock(&msgq_list_lock);
-
-    LISTP_FOR_EACH_ENTRY_SAFE(msgq, n, &msgq_list, list) {
-        if (msgq->owned) {
-            struct shim_handle* hdl = MSG_TO_HANDLE(msgq);
-            lock(&hdl->lock);
-            __store_msg_persist(msgq);
-            unlock(&hdl->lock);
-        }
-    }
-
-    unlock(&msgq_list_lock);
-    return 0;
 }

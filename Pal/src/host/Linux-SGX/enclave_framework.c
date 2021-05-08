@@ -122,19 +122,17 @@ bool sgx_copy_to_enclave(void* ptr, size_t maxsize, const void* uptr, size_t usi
 }
 
 static void print_report(sgx_report_t* r) {
-    SGX_DBG(DBG_S, "  cpu_svn:     %s\n",     ALLOCA_BYTES2HEXSTR(r->body.cpu_svn.svn));
-    SGX_DBG(DBG_S, "  mr_enclave:  %s\n",     ALLOCA_BYTES2HEXSTR(r->body.mr_enclave.m));
-    SGX_DBG(DBG_S, "  mr_signer:   %s\n",     ALLOCA_BYTES2HEXSTR(r->body.mr_signer.m));
-    SGX_DBG(DBG_S, "  attr.flags:  %016lx\n", r->body.attributes.flags);
-    SGX_DBG(DBG_S, "  attr.xfrm:   %016lx\n", r->body.attributes.xfrm);
-    SGX_DBG(DBG_S, "  isv_prod_id: %02x\n",   r->body.isv_prod_id);
-    SGX_DBG(DBG_S, "  isv_svn:     %02x\n",   r->body.isv_svn);
-    SGX_DBG(DBG_S, "  report_data: %s\n",     ALLOCA_BYTES2HEXSTR(r->body.report_data.d));
-    SGX_DBG(DBG_S, "  key_id:      %s\n",     ALLOCA_BYTES2HEXSTR(r->key_id.id));
-    SGX_DBG(DBG_S, "  mac:         %s\n",     ALLOCA_BYTES2HEXSTR(r->mac));
+    log_debug("  cpu_svn:     %s\n",     ALLOCA_BYTES2HEXSTR(r->body.cpu_svn.svn));
+    log_debug("  mr_enclave:  %s\n",     ALLOCA_BYTES2HEXSTR(r->body.mr_enclave.m));
+    log_debug("  mr_signer:   %s\n",     ALLOCA_BYTES2HEXSTR(r->body.mr_signer.m));
+    log_debug("  attr.flags:  %016lx\n", r->body.attributes.flags);
+    log_debug("  attr.xfrm:   %016lx\n", r->body.attributes.xfrm);
+    log_debug("  isv_prod_id: %02x\n",   r->body.isv_prod_id);
+    log_debug("  isv_svn:     %02x\n",   r->body.isv_svn);
+    log_debug("  report_data: %s\n",     ALLOCA_BYTES2HEXSTR(r->body.report_data.d));
+    log_debug("  key_id:      %s\n",     ALLOCA_BYTES2HEXSTR(r->key_id.id));
+    log_debug("  mac:         %s\n",     ALLOCA_BYTES2HEXSTR(r->mac));
 }
-
-static sgx_key_128bit_t g_enclave_key;
 
 static int __sgx_get_report(sgx_target_info_t* target_info, sgx_sign_data_t* data,
                             sgx_report_t* report) {
@@ -144,7 +142,7 @@ static int __sgx_get_report(sgx_target_info_t* target_info, sgx_sign_data_t* dat
 
     int ret = sgx_report(target_info, &state, report);
     if (ret) {
-        SGX_DBG(DBG_E, "sgx_report failed: ret = %d)\n", ret);
+        log_error("sgx_report failed: ret = %d)\n", ret);
         return -PAL_ERROR_DENIED;
     }
 
@@ -156,7 +154,7 @@ int sgx_get_report(const sgx_target_info_t* target_info, const sgx_report_data_t
                    sgx_report_t* report) {
     int ret = sgx_report(target_info, data, report);
     if (ret) {
-        SGX_DBG(DBG_E, "sgx_report failed: ret = %d\n", ret);
+        log_error("sgx_report failed: ret = %d\n", ret);
         return -PAL_ERROR_DENIED;
     }
     return 0;
@@ -173,11 +171,11 @@ int sgx_verify_report(sgx_report_t* report) {
 
     int ret = sgx_getkey(&keyrequest, &report_key);
     if (ret) {
-        SGX_DBG(DBG_E, "Can't get report key\n");
+        log_error("Can't get report key\n");
         return -PAL_ERROR_DENIED;
     }
 
-    SGX_DBG(DBG_S, "Get report key for verification: %s\n", ALLOCA_BYTES2HEXSTR(report_key));
+    log_debug("Get report key for verification: %s\n", ALLOCA_BYTES2HEXSTR(report_key));
 
     sgx_mac_t check_mac;
     memset(&check_mac, 0, sizeof(check_mac));
@@ -192,61 +190,35 @@ int sgx_verify_report(sgx_report_t* report) {
     // Clear the report key for security
     memset(&report_key, 0, sizeof(report_key));
 
-    SGX_DBG(DBG_S, "Verify report:\n");
+    log_debug("Verify report:\n");
     print_report(report);
-    SGX_DBG(DBG_S, "  verify:     %s\n", ALLOCA_BYTES2HEXSTR(check_mac));
+    log_debug("  verify:     %s\n", ALLOCA_BYTES2HEXSTR(check_mac));
 
     if (memcmp(&check_mac, &report->mac, sizeof(check_mac))) {
-        SGX_DBG(DBG_E, "Report verification failed\n");
+        log_error("Report verification failed\n");
         return -PAL_ERROR_DENIED;
     }
 
     return 0;
 }
 
-int init_enclave_key(void) {
-    __sgx_mem_aligned sgx_key_request_t keyrequest;
-    memset(&keyrequest, 0, sizeof(sgx_key_request_t));
-    keyrequest.key_name = SEAL_KEY;
-
-    int ret = sgx_getkey(&keyrequest, &g_enclave_key);
-    if (ret) {
-        SGX_DBG(DBG_E, "Can't get seal key\n");
-        return -PAL_ERROR_DENIED;
-    }
-
-    SGX_DBG(DBG_S, "Seal key: %s\n", ALLOCA_BYTES2HEXSTR(g_enclave_key));
-    return 0;
-}
-
-/*
- * The file integrity check is designed as follow:
+/* For each file that requires authentication (specified in the manifest as "sgx.trusted_files"), a
+ * SHA256 hash is generated and stored in the manifest, signed and verified as part of the enclave's
+ * crypto measurement. When user opens such a file, Graphene loads the whole file, calculates its
+ * SHA256 hash, and checks against the corresponding hash in the manifest. If the hashes do not
+ * match, the file access will be rejected.
  *
- * For each file that requires authentication (specified in the manifest
- * as "sgx.trusted_files.xxx"), a SHA256 checksum is generated and stored
- * in the manifest, signed and verified as part of the enclave's crypto
- * measurement. When user requests for opening the file, Graphene loads
- * the whole file, generate the SHA256 checksum, and check with the known
- * checksums listed in the manifest. If the checksum does not match, and
- * neither does the file is allowed for unauthenticated access, the file
- * access will be rejected.
- *
- * During the generation of the SHA256 checksum, a 128-bit hash is also
- * generated for each chunk in the file. The per-chunk hashes are used
- * for partial verification in future reads, to avoid re-verifying the
- * whole file again or the need of caching file contents. The per-chunk
- * hashes are stored as "stubs" for each file. For a performance reason,
- * each per-chunk hash is a 128-bit AES-CMAC hash value, using a secret
- * key generated at the beginning of the enclave.
- */
-
+ * During the generation of the SHA256 hash, a 128-bit hash (truncated SHA256) is also generated for
+ * each chunk (of size TRUSTED_CHUNK_SIZE) in the file. The per-chunk hashes are used for partial
+ * verification in future reads, to avoid re-verifying the whole file again or the need of caching
+ * file contents. */
 DEFINE_LIST(trusted_file);
 struct trusted_file {
     LIST_TYPE(trusted_file) list;
     uint64_t size;
     bool allowed;
-    sgx_checksum_t checksum;
-    sgx_stub_t* stubs;
+    sgx_file_hash_t file_hash;      /* hash over the whole file, must be the same as in manifest */
+    sgx_chunk_hash_t* chunk_hashes; /* array of hashes over separate file chunks */
     size_t uri_len;
     char uri[]; /* must be NULL-terminated */
 };
@@ -279,63 +251,63 @@ static bool path_is_equal_or_subpath(const struct trusted_file* tf, const char* 
     return false;
 }
 
-/*
- * 'load_trusted_file' checks if the file to be opened is trusted
- * or allowed for unauthenticated access, according to the manifest.
- *
- * file:     file handle to be opened
- * stubptr:  buffer for catching matched file stub.
- * sizeptr:  size pointer
- * create:   this file is newly created or not
- *
- * Returns 0 if succeeded, or an error code otherwise.
- */
-int load_trusted_file(PAL_HANDLE file, sgx_stub_t** stubptr, uint64_t* sizeptr, int create,
-                      void** umem) {
-    *stubptr = NULL;
-    *sizeptr = 0;
+int load_trusted_file(PAL_HANDLE file, sgx_chunk_hash_t** chunk_hashes_ptr, uint64_t* size_ptr,
+                      int create, void** umem) {
+    *chunk_hashes_ptr = NULL;
+    *size_ptr = 0;
     *umem = NULL;
+
+    uint8_t* tmp_chunk = NULL; /* scratch buf to calculate whole-file and chunk-of-file hashes */
 
     struct trusted_file* tf = NULL;
     struct trusted_file* tmp;
-    char uri[URI_MAX];
-    char normpath[URI_MAX];
     int ret, fd = file->file.fd;
+    char* uri = malloc(URI_MAX);
+    const size_t normpath_size = URI_MAX;
+    char* normpath = malloc(normpath_size);
+    if (!uri || !normpath) {
+        ret = -PAL_ERROR_NOMEM;
+        goto out_free;
+    }
 
-    if (!(HANDLE_HDR(file)->flags & RFD(0)))
-        return -PAL_ERROR_DENIED;
+    if (!(HANDLE_HDR(file)->flags & RFD(0))) {
+        ret = -PAL_ERROR_DENIED;
+        goto out_free;
+    }
 
     ret = _DkStreamGetName(file, uri, URI_MAX);
     if (ret < 0) {
-        return ret;
+        goto out_free;
     }
 
     /* always allow creating files */
     if (create) {
         register_trusted_file(uri, NULL, /*check_duplicates=*/true);
-        return 0;
+        ret = 0;
+        goto out_free;
     }
 
     /* Normalize the uri */
     if (!strstartswith(uri, URI_PREFIX_FILE)) {
-        SGX_DBG(DBG_E, "Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
-        return -PAL_ERROR_INVAL;
+        log_error("Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
+        ret = -PAL_ERROR_INVAL;
+        goto out_free;
     }
-    static_assert(sizeof(normpath) > URI_PREFIX_FILE_LEN, "`normpath` is too small");
+    assert(normpath_size > URI_PREFIX_FILE_LEN);
     memcpy(normpath, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
-    size_t len = sizeof(normpath) - URI_PREFIX_FILE_LEN;
+    size_t len = normpath_size - URI_PREFIX_FILE_LEN;
     ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, normpath + URI_PREFIX_FILE_LEN, &len);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Path (%s) normalization failed: %s\n", uri + URI_PREFIX_FILE_LEN,
-                pal_strerror(-ret));
-        return ret;
+        log_error("Path (%s) normalization failed: %s\n", uri + URI_PREFIX_FILE_LEN,
+                  pal_strerror(ret));
+        goto out_free;
     }
     len += URI_PREFIX_FILE_LEN;
 
     spinlock_lock(&g_trusted_file_lock);
 
     LISTP_FOR_EACH_ENTRY(tmp, &g_trusted_file_list, list) {
-        if (tmp->stubs) {
+        if (tmp->chunk_hashes) {
             /* trusted files: must be exactly the same URI */
             if (tmp->uri_len == len && !memcmp(tmp->uri, normpath, len + 1)) {
                 tf = tmp;
@@ -354,143 +326,146 @@ int load_trusted_file(PAL_HANDLE file, sgx_stub_t** stubptr, uint64_t* sizeptr, 
 
     if (!tf || tf->allowed) {
         if (!tf) {
-            if (get_file_check_policy() != FILE_CHECK_POLICY_ALLOW_ALL_BUT_LOG)
-                return -PAL_ERROR_DENIED;
+            if (get_file_check_policy() != FILE_CHECK_POLICY_ALLOW_ALL_BUT_LOG) {
+                ret = -PAL_ERROR_DENIED;
+                goto out_free;
+            }
 
-            pal_printf("Allowing access to an unknown file due to "
-                       "file_check_policy settings: %s\n", uri);
+            log_always("Allowing access to an unknown file due to file_check_policy settings: %s\n",
+                       uri);
         }
 
-        *stubptr = NULL;
+        /* allowed files do not need any integrity, so no need for chunk hashes */
+        *chunk_hashes_ptr = NULL;
+
         PAL_STREAM_ATTR attr;
         ret = _DkStreamAttributesQuery(normpath, &attr);
-        if (!ret)
-            *sizeptr = attr.pending_size;
-        else
-            *sizeptr = 0;
+        *size_ptr = ret == 0 ? attr.pending_size : 0;
 
-        return 0;
+        ret = 0;
+        goto out_free;
     }
+
+    free(uri);
+    free(normpath);
+    /* Not needed, just for sanity. */
+    uri = NULL;
+    normpath = NULL;
 
     /* trusted file must be a regular file (seekable) */
     if (!file->file.seekable)
         return -PAL_ERROR_DENIED;
 
-    sgx_stub_t* stubs = NULL;
+    sgx_chunk_hash_t* chunk_hashes = NULL;
     /* mmap the whole trusted file in untrusted memory for future reads/writes; it is
      * caller's responsibility to unmap those areas after use */
-    *sizeptr = tf->size;
-    if (*sizeptr) {
+    *size_ptr = tf->size;
+    if (*size_ptr) {
         ret = ocall_mmap_untrusted(umem, tf->size, PROT_READ, MAP_SHARED, fd, /*offset=*/0);
-        if (IS_ERR(ret)) {
+        if (ret < 0) {
             *umem = NULL;
-            ret = unix_to_pal_error(ERRNO(ret));
+            ret = unix_to_pal_error(ret);
             goto failed;
         }
     }
 
     spinlock_lock(&g_trusted_file_lock);
-    if (tf->stubs) {
-        *stubptr = tf->stubs;
+    if (tf->chunk_hashes) {
+        *chunk_hashes_ptr = tf->chunk_hashes;
         spinlock_unlock(&g_trusted_file_lock);
         return 0;
     }
     spinlock_unlock(&g_trusted_file_lock);
 
-    int nstubs = tf->size / TRUSTED_STUB_SIZE +
-                (tf->size % TRUSTED_STUB_SIZE ? 1 : 0);
-
-    stubs = malloc(sizeof(sgx_stub_t) * nstubs);
-    if (!stubs) {
+    chunk_hashes = malloc(sizeof(sgx_chunk_hash_t) * DIV_ROUND_UP(tf->size, TRUSTED_CHUNK_SIZE));
+    if (!chunk_hashes) {
         ret = -PAL_ERROR_NOMEM;
         goto failed;
     }
 
-    sgx_stub_t* s = stubs; /* stubs is an array of 128bit values */
-    uint64_t offset = 0;
-    LIB_SHA256_CONTEXT sha;
-
-    ret = lib_SHA256Init(&sha);
-    if (ret < 0)
+    tmp_chunk = malloc(TRUSTED_CHUNK_SIZE);
+    if (!tmp_chunk) {
+        ret = -PAL_ERROR_NOMEM;
         goto failed;
-
-    for (; offset < tf->size; offset += TRUSTED_STUB_SIZE, s++) {
-        /* For each stub, generate a 128bit hash of a file chunk with
-         * AES-CMAC, and then update the SHA256 digest. */
-        uint64_t mapping_size = MIN(tf->size - offset, TRUSTED_STUB_SIZE);
-        LIB_AESCMAC_CONTEXT aes_cmac;
-        ret = lib_AESCMACInit(&aes_cmac, (uint8_t*)&g_enclave_key, sizeof(g_enclave_key));
-        if (ret < 0)
-            goto failed;
-
-        /*
-         * To prevent TOCTOU attack when generating the file checksum, we
-         * need to copy the file content into the enclave before hashing.
-         * For optimization, we use a relatively small buffer (1024 byte) to
-         * store the data for checksum generation.
-         */
-
-#define FILE_CHUNK_SIZE 1024UL
-
-        uint8_t small_chunk[FILE_CHUNK_SIZE]; /* Buffer for hashing */
-        size_t chunk_offset = 0;
-
-        for (; chunk_offset < mapping_size; chunk_offset += FILE_CHUNK_SIZE) {
-            uint64_t chunk_size = MIN(mapping_size - chunk_offset, FILE_CHUNK_SIZE);
-
-            /* Any file content needs to be copied into the enclave before
-             * checking and re-hashing */
-            memcpy(small_chunk, *umem + offset + chunk_offset, chunk_size);
-
-            /* Update the file checksum */
-            ret = lib_SHA256Update(&sha, small_chunk, chunk_size);
-            if (ret < 0)
-                goto failed;
-
-            /* Update the checksum for the file chunk */
-            ret = lib_AESCMACUpdate(&aes_cmac, small_chunk, chunk_size);
-            if (ret < 0)
-                goto failed;
-        }
-
-        /* Store the checksum for one file chunk for checking */
-        ret = lib_AESCMACFinish(&aes_cmac, (uint8_t*)s, sizeof(*s));
-        if (ret < 0)
-            goto failed;
     }
 
-    sgx_checksum_t hash;
+    sgx_chunk_hash_t* chunk_hashes_item = chunk_hashes;
+    uint64_t offset = 0;
+    LIB_SHA256_CONTEXT file_sha;
 
-    /* Finalize and checking if the checksum of the whole file matches
-     * with record given in the manifest. */
-
-    ret = lib_SHA256Final(&sha, (uint8_t*)hash.bytes);
+    ret = lib_SHA256Init(&file_sha);
     if (ret < 0)
         goto failed;
 
-    if (memcmp(&hash, &tf->checksum, sizeof(sgx_checksum_t))) {
+    for (; offset < tf->size; offset += TRUSTED_CHUNK_SIZE, chunk_hashes_item++) {
+        /* For each file chunk of size TRUSTED_CHUNK_SIZE, generate 128-bit hash from SHA-256 hash
+         * over contents of this file chunk (we simply truncate SHA-256 hash to first 128 bits; this
+         * is fine for integrity purposes). Also, generate a SHA-256 hash for the whole file
+         * contents to compare with the manifest "reference" hash value. */
+        uint64_t chunk_size = MIN(tf->size - offset, TRUSTED_CHUNK_SIZE);
+        LIB_SHA256_CONTEXT chunk_sha;
+        ret = lib_SHA256Init(&chunk_sha);
+        if (ret < 0)
+            goto failed;
+
+        /* to prevent TOCTOU attacks, copy file contents into the enclave before hashing */
+        memcpy(tmp_chunk, *umem + offset, chunk_size);
+
+        ret = lib_SHA256Update(&file_sha, tmp_chunk, chunk_size);
+        if (ret < 0)
+            goto failed;
+
+        ret = lib_SHA256Update(&chunk_sha, tmp_chunk, chunk_size);
+        if (ret < 0)
+            goto failed;
+
+        sgx_chunk_hash_t chunk_hash[2]; /* each chunk_hash is 128 bits in size */
+        ret = lib_SHA256Final(&chunk_sha, (uint8_t*)&chunk_hash[0]);
+        if (ret < 0)
+            goto failed;
+
+        /* note that we truncate SHA256 to 128 bits */
+        memcpy(chunk_hashes_item, &chunk_hash[0], sizeof(*chunk_hashes_item));
+    }
+
+    sgx_file_hash_t file_hash;
+    ret = lib_SHA256Final(&file_sha, file_hash.bytes);
+    if (ret < 0)
+        goto failed;
+
+    /* check the generated hash-over-whole-file against the reference hash in the manifest */
+    if (memcmp(&file_hash, &tf->file_hash, sizeof(file_hash))) {
         ret = -PAL_ERROR_DENIED;
         goto failed;
     }
 
     spinlock_lock(&g_trusted_file_lock);
-    if (tf->stubs) {
-        *stubptr = tf->stubs;
+    if (tf->chunk_hashes) {
+        *chunk_hashes_ptr = tf->chunk_hashes;
         spinlock_unlock(&g_trusted_file_lock);
-        free(stubs);
+        free(chunk_hashes);
+        free(tmp_chunk);
         return 0;
     }
-    *stubptr = tf->stubs = stubs;
+    tf->chunk_hashes = chunk_hashes;
+    *chunk_hashes_ptr = chunk_hashes;
     spinlock_unlock(&g_trusted_file_lock);
+
+    free(tmp_chunk);
     return 0;
 
 failed:
     if (*umem) {
-        assert(*sizeptr > 0);
-        ocall_munmap_untrusted(*umem, *sizeptr);
+        assert(*size_ptr > 0);
+        ocall_munmap_untrusted(*umem, *size_ptr);
     }
-    free(stubs);
+    free(chunk_hashes);
+    free(tmp_chunk);
+    return ret;
 
+out_free:
+    free(uri);
+    free(normpath);
     return ret;
 }
 
@@ -502,138 +477,83 @@ static void set_file_check_policy(int policy) {
     g_file_check_policy = policy;
 }
 
-/*
- * A common helper function for copying and checking the file contents
- * from a buffer mapped outside the enclaves into an in-enclave buffer.
- * If needed, regions at either the beginning or the end of the copied regions
- * are copied into a scratch buffer to avoid a TOCTTOU race.
- *
- * * Note that it must be done this way to avoid the following TOCTTOU race
- * * condition with the untrusted host as an adversary:
- *       *  Adversary: put good contents in buffer
- *       *  Enclave: buffer check passes
- *       *  Adversary: put bad contents in buffer
- *       *  Enclave: copies in bad buffer contents
- *
- * * For optimization, we verify the memory in place, as the application code
- *   should not use the memory before return.  There can be subtle interactions
- *   at the edges of a region with ELF loading.  Namely, the ELF loader will
- *   want to map several file chunks that are not aligned to TRUSTED_STUB_SIZE
- *   next to each other, sometimes overlapping.  There is probably room to
- *   improve load time with more smarts around ELF loading, but for now, just
- *   make things work.
- *
- * 'umem' is the untrusted file memory mapped outside the enclave (should
- * already be mapped up by the caller). 'umem_start' and 'umem_end' are
- * the offset _within the file_ of 'umem'.  'umem_start' should be aligned
- * to the file checking chunk size (TRUSTED_STUB_SIZE). 'umem_end' can be
- * either aligned, or equal to 'total_size'. 'buffer' is the in-enclave
- * buffer for copying the file content. 'offset' is the offset within the file
- * for copying into the buffer. 'size' is the size of the in-enclave buffer.
- * 'stubs' contain the checksums of all the chunks in a file.
- */
-int copy_and_verify_trusted_file(const char* path, const void* umem, uint64_t umem_start,
-                                 uint64_t umem_end, void* buffer, uint64_t offset, uint64_t size,
-                                 sgx_stub_t* stubs, uint64_t total_size) {
-    /* Check that the untrusted mapping is aligned to TRUSTED_STUB_SIZE
-     * and includes the range for copying into the buffer */
-    assert(IS_ALIGNED(umem_start, TRUSTED_STUB_SIZE));
-    assert(offset >= umem_start && offset + size <= umem_end);
-
-    /* Start copying and checking at umem_start. The checked content may or
-     * may not be copied into the file content, depending on the offset of
-     * the content within the file. */
-    uint64_t checking = umem_start;
-    /* The stubs is an array of 128-bit hash values of the file chunks.
-     * from the beginning of the file. 's' points to the stub that needs to
-     * be checked for the current offset. */
-    sgx_stub_t* s = stubs + checking / TRUSTED_STUB_SIZE;
+int copy_and_verify_trusted_file(const char* path, uint8_t* buf, const void* umem,
+                                 off_t aligned_offset, off_t aligned_end, off_t offset, off_t end,
+                                 sgx_chunk_hash_t* chunk_hashes, size_t file_size) {
     int ret = 0;
 
-    for (; checking < umem_end; checking += TRUSTED_STUB_SIZE, s++) {
-        /* Check one chunk at a time. */
-        uint64_t checking_size = MIN(total_size - checking, TRUSTED_STUB_SIZE);
-        uint64_t checking_end = checking + checking_size;
-        sgx_checksum_t hash;
+    assert(IS_ALIGNED(aligned_offset, TRUSTED_CHUNK_SIZE));
+    assert(offset >= aligned_offset && end <= aligned_end);
 
-        if (checking >= offset && checking_end <= offset + size) {
-            /* If the checking chunk completely overlaps with the region
-             * needed for copying into the buffer, simplying use the buffer
-             * for checking */
-            memcpy(buffer + checking - offset, umem + checking - umem_start, checking_size);
+    uint8_t* tmp_chunk = malloc(TRUSTED_CHUNK_SIZE);
+    if (!tmp_chunk) {
+        ret = -PAL_ERROR_NOMEM;
+        goto failed;
+    }
 
-            /* Storing the checksum (using AES-CMAC) inside hash. */
-            ret = lib_AESCMAC((uint8_t*)&g_enclave_key, sizeof(g_enclave_key),
-                              buffer + checking - offset, checking_size, (uint8_t*)&hash,
-                              sizeof(hash));
-        } else {
-            /* If the checking chunk only partially overlaps with the region,
-             * read the file content in smaller chunks and only copy the part
-             * needed by the caller. */
-            LIB_AESCMAC_CONTEXT aes_cmac;
-            ret = lib_AESCMACInit(&aes_cmac, (uint8_t*)&g_enclave_key, sizeof(g_enclave_key));
-            if (ret < 0)
-                goto failed;
+    sgx_chunk_hash_t* chunk_hashes_item = chunk_hashes + aligned_offset / TRUSTED_CHUNK_SIZE;
 
-            uint8_t small_chunk[FILE_CHUNK_SIZE]; /* A small buffer */
-            uint64_t chunk_offset = checking;
+    uint8_t* buf_pos = buf;
+    off_t chunk_offset = aligned_offset;
+    for (; chunk_offset < aligned_end; chunk_offset += TRUSTED_CHUNK_SIZE, chunk_hashes_item++) {
+        size_t chunk_size = MIN(file_size - chunk_offset, TRUSTED_CHUNK_SIZE);
+        off_t chunk_end   = chunk_offset + chunk_size;
 
-            for (; chunk_offset < checking_end; chunk_offset += FILE_CHUNK_SIZE) {
-                uint64_t chunk_size = MIN(checking_end - chunk_offset, FILE_CHUNK_SIZE);
+        sgx_chunk_hash_t chunk_hash[2]; /* each chunk_hash is 128 bits in size but we need 256 */
 
-                /* Copy into the small buffer before hashing the content */
-                memcpy(small_chunk, umem + (chunk_offset - umem_start), chunk_size);
-
-                /* Update the hash for the current chunk */
-                ret = lib_AESCMACUpdate(&aes_cmac, small_chunk, chunk_size);
-                if (ret < 0)
-                    goto failed;
-
-                /* Determine if the part just copied and checked is needed
-                 * by the caller. If so, copy it into the user buffer. */
-                uint64_t copy_start = chunk_offset;
-                uint64_t copy_end = copy_start + chunk_size;
-
-                if (copy_start < offset)
-                    copy_start = offset;
-                if (copy_end > offset + size)
-                    copy_end = offset + size;
-
-                if (copy_end > copy_start)
-                    memcpy(buffer + (copy_start - offset),
-                           small_chunk + (copy_start - chunk_offset),
-                           copy_end - copy_start);
-            }
-
-            /* Storing the checksum (using AES-CMAC) inside hash. */
-            ret = lib_AESCMACFinish(&aes_cmac, (uint8_t*)&hash, sizeof(hash));
-        }
-
+        LIB_SHA256_CONTEXT chunk_sha;
+        ret = lib_SHA256Init(&chunk_sha);
         if (ret < 0)
             goto failed;
 
-        /*
-         * Check if the hash matches with the checksum of current chunk.
-         * If not, return with access denied. Note: some file content may
-         * still be in the buffer (including the corrupted part).
-         * We assume the user won't use the content if this function
-         * returns with failures.
-         *
-         * XXX: Maybe we should zero the buffer after denying the access?
-         */
-        if (memcmp(s, &hash, sizeof(sgx_stub_t))) {
-            SGX_DBG(DBG_E,
-                    "Accesing file:%s is denied. Does not match with MAC at chunk starting at "
-                    "%lu-%lu.\n",
-                    path, checking, checking_end);
-            return -PAL_ERROR_DENIED;
+        if (chunk_offset >= offset && chunk_end <= end) {
+            /* if current chunk-to-copy completely resides in the requested region-to-copy,
+             * directly copy into buf (without a scratch buffer) and hash in-place */
+            memcpy(buf_pos, umem + chunk_offset, chunk_size);
+
+            ret = lib_SHA256Update(&chunk_sha, buf_pos, chunk_size);
+            if (ret < 0)
+                goto failed;
+
+            buf_pos += chunk_size;
+        } else {
+            /* if current chunk-to-copy only partially overlaps with the requested region-to-copy,
+             * read the file contents into a scratch buffer, verify hash and then copy only the part
+             * needed by the caller */
+            memcpy(tmp_chunk, umem + chunk_offset, chunk_size);
+
+            ret = lib_SHA256Update(&chunk_sha, tmp_chunk, chunk_size);
+            if (ret < 0)
+                goto failed;
+
+            /* determine which part of the chunk is needed by the caller */
+            off_t copy_start = MAX(chunk_offset, offset);
+            off_t copy_end   = MIN(chunk_offset + (off_t)chunk_size, end);
+            assert(copy_end > copy_start);
+
+            memcpy(buf_pos, tmp_chunk + copy_start - chunk_offset, copy_end - copy_start);
+            buf_pos += copy_end - copy_start;
+        }
+
+        ret = lib_SHA256Final(&chunk_sha, (uint8_t*)&chunk_hash[0]);
+        if (ret < 0)
+            goto failed;
+
+        if (memcmp(chunk_hashes_item, &chunk_hash[0], sizeof(*chunk_hashes_item))) {
+            log_error("Accessing file '%s' is denied: incorrect hash of file chunk at %lu-%lu.\n",
+                      path, chunk_offset, chunk_end);
+            ret = -PAL_ERROR_DENIED;
+            goto failed;
         }
     }
 
+    free(tmp_chunk);
     return 0;
 
 failed:
-    return -PAL_ERROR_DENIED;
+    free(tmp_chunk);
+    memset(buf, 0, end - offset);
+    return ret;
 }
 
 static int register_trusted_file(const char* uri, const char* checksum_str, bool check_duplicates) {
@@ -641,7 +561,7 @@ static int register_trusted_file(const char* uri, const char* checksum_str, bool
 
     size_t uri_len = strlen(uri);
     if (uri_len >= URI_MAX) {
-        SGX_DBG(DBG_E, "Size of file exceeds maximum %dB: %s\n", URI_MAX, uri);
+        log_error("Size of file exceeds maximum %dB: %s\n", URI_MAX, uri);
         return -PAL_ERROR_INVAL;
     }
 
@@ -665,8 +585,8 @@ static int register_trusted_file(const char* uri, const char* checksum_str, bool
         return -PAL_ERROR_NOMEM;
 
     INIT_LIST_HEAD(new, list);
-    new->size    = 0;
-    new->stubs   = NULL;
+    new->size = 0;
+    new->chunk_hashes = NULL;
     new->allowed = false;
     new->uri_len = uri_len;
     memcpy(new->uri, uri, uri_len + 1);
@@ -675,31 +595,28 @@ static int register_trusted_file(const char* uri, const char* checksum_str, bool
         PAL_STREAM_ATTR attr;
         ret = _DkStreamAttributesQuery(uri, &attr);
         if (ret < 0) {
-            SGX_DBG(DBG_E, "Could not find size of file: %s\n", uri);
+            log_error("Could not find size of file: %s\n", uri);
             free(new);
             return ret;
         }
         new->size = attr.pending_size;
 
-        assert(strlen(checksum_str) >= sizeof(sgx_checksum_t) * 2);
-        for (size_t i = 0; i < sizeof(sgx_checksum_t); i++) {
+        assert(strlen(checksum_str) >= sizeof(sgx_file_hash_t) * 2);
+        for (size_t i = 0; i < sizeof(sgx_file_hash_t); i++) {
             int8_t byte1 = hex2dec(checksum_str[i * 2]);
             int8_t byte2 = hex2dec(checksum_str[i * 2 + 1]);
 
             if (byte1 < 0 || byte2 < 0) {
-                SGX_DBG(DBG_E, "Could not parse checksum of file: %s\n", uri);
+                log_error("Could not parse checksum of file: %s\n", uri);
                 free(new);
                 return -PAL_ERROR_INVAL;
             }
 
-            new->checksum.bytes[i] = byte1 * 16 + byte2;
+            new->file_hash.bytes[i] = byte1 * 16 + byte2;
         }
-
-        SGX_DBG(DBG_S, "trusted: %s\n", new->uri);
     } else {
-        memset(&new->checksum, 0, sizeof(sgx_checksum_t));
+        memset(&new->file_hash, 0, sizeof(new->file_hash));
         new->allowed = true;
-        SGX_DBG(DBG_S, "allowed: %s\n", new->uri);
     }
 
     spinlock_lock(&g_trusted_file_lock);
@@ -725,39 +642,54 @@ static int register_trusted_file(const char* uri, const char* checksum_str, bool
 
 static int init_trusted_file(const char* key, const char* uri) {
     int ret;
+    char* normpath = NULL;
 
     /* read sgx.trusted_checksum.<key> entry from manifest */
-    char* fullkey = alloc_concat("sgx.trusted_checksum.", static_strlen("sgx.trusted_checksum."),
-                                 key, strlen(key));
+    char* fullkey = alloc_concat3("sgx.trusted_checksum.\"", -1, key, -1, "\"", -1);
     if (!fullkey)
         return -PAL_ERROR_NOMEM;
 
-    char* trusted_checksum = NULL;
-    ret = toml_string_in(g_pal_state.manifest_root, fullkey, &trusted_checksum);
+    /* NOTE: sgx.trusted_checksum entries are actually SHA-256 hashes, so the better name would be
+     * sgx.trusted_hash but we don't want to break old manifests so we keep the legacy name */
+    char* trusted_checksum_str = NULL;
+    ret = toml_string_in(g_pal_state.manifest_root, fullkey, &trusted_checksum_str);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Cannot parse \'%s\' (the value must be put in double quotes!)\n", fullkey);
+        log_error("Cannot parse '%s'\n", fullkey);
+        ret = -PAL_ERROR_INVAL;
+        goto out;
+    }
+    if (!trusted_checksum_str) {
+        log_error("Missing '%s' entry\n", fullkey);
         ret = -PAL_ERROR_INVAL;
         goto out;
     }
 
     /* Normalize the uri */
-    char normpath[URI_MAX] = URI_PREFIX_FILE;
+    const size_t normpath_size = URI_MAX;
+    normpath = malloc(normpath_size);
+    if (!normpath) {
+        ret = -PAL_ERROR_NOMEM;
+        goto out;
+    }
+    (void)strcpy_static(normpath, URI_PREFIX_FILE, normpath_size);
+
     if (!strstartswith(uri, URI_PREFIX_FILE)) {
-        SGX_DBG(DBG_E, "Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
+        log_error("Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
         ret = -PAL_ERROR_INVAL;
         goto out;
     }
-    size_t len = sizeof(normpath) - strlen(normpath);
+    size_t len = normpath_size - strlen(normpath);
     ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, normpath + URI_PREFIX_FILE_LEN, &len);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Path (%s) normalization failed: %s\n", uri + URI_PREFIX_FILE_LEN,
-                pal_strerror(-ret));
+        log_error("Path (%s) normalization failed: %s\n", uri + URI_PREFIX_FILE_LEN,
+                  pal_strerror(ret));
         goto out;
     }
 
-    ret = register_trusted_file(normpath, trusted_checksum, /*check_duplicates=*/false);
+    ret = register_trusted_file(normpath, trusted_checksum_str, /*check_duplicates=*/false);
 out:
-    free(trusted_checksum);
+    free(normpath);
+    free(trusted_checksum_str);
     free(fullkey);
     return ret;
 }
@@ -765,22 +697,18 @@ out:
 int init_trusted_files(void) {
     int ret;
 
-    ret = init_trusted_file("exec", g_pal_sec.exec_name);
-    if (ret < 0)
-        return ret;
-
     /* read loader.preload string from manifest and register its files as trusted */
     char* preload_str = NULL;
     ret = toml_string_in(g_pal_state.manifest_root, "loader.preload", &preload_str);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Cannot parse \'loader.preload\' "
-                       "(the value must be put in double quotes!)\n");
+        log_error("Cannot parse \'loader.preload\' "
+                  "(the value must be put in double quotes!)\n");
         return -PAL_ERROR_INVAL;
     }
 
     if (preload_str) {
         int npreload = 0;
-        char key[10];
+        char key[20];
         const char* start;
         const char* end;
         size_t len = strlen(preload_str);
@@ -792,7 +720,7 @@ int init_trusted_files(void) {
                 char uri[end - start + 1];
                 memcpy(uri, start, end - start);
                 uri[end - start] = 0;
-                snprintf(key, 10, "preload%d", npreload++);
+                snprintf(key, 20, "preload%d", npreload++);
 
                 ret = init_trusted_file(key, uri);
                 if (ret < 0) {
@@ -827,7 +755,7 @@ int init_trusted_files(void) {
         char* toml_trusted_file_str = NULL;
         ret = toml_rtos(toml_trusted_file_raw, &toml_trusted_file_str);
         if (ret < 0) {
-            SGX_DBG(DBG_E, "Invalid trusted file in manifest: \'%s\'\n", toml_trusted_file_key);
+            log_error("Invalid trusted file in manifest: \'%s\'\n", toml_trusted_file_key);
             continue;
         }
 
@@ -841,6 +769,9 @@ int init_trusted_files(void) {
     }
 
 no_trusted:
+    ret = 0;
+    char* norm_path = NULL;
+
     /* read sgx.allowed_files entries from manifest and register them */
     if (!manifest_sgx)
         goto no_allowed;
@@ -853,6 +784,13 @@ no_trusted:
     if (toml_allowed_files_cnt <= 0)
         goto no_allowed;
 
+    const size_t norm_path_size = URI_MAX;
+    norm_path = malloc(norm_path_size);
+    if (!norm_path) {
+        ret = -PAL_ERROR_NOMEM;
+        goto no_allowed;
+    }
+
     for (ssize_t i = 0; i < toml_allowed_files_cnt; i++) {
         const char* toml_allowed_file_key = toml_key_in(toml_allowed_files, i);
         assert(toml_allowed_file_key);
@@ -862,109 +800,40 @@ no_trusted:
         char* toml_allowed_file_str = NULL;
         ret = toml_rtos(toml_allowed_file_raw, &toml_allowed_file_str);
         if (ret < 0) {
-            SGX_DBG(DBG_E, "Invalid allowed file in manifest: \'%s\'\n", toml_allowed_file_key);
+            log_error("Invalid allowed file in manifest: \'%s\'\n", toml_allowed_file_key);
             continue;
         }
 
-        char norm_path[URI_MAX];
-
         if (!strstartswith(toml_allowed_file_str, URI_PREFIX_FILE)) {
-            SGX_DBG(DBG_E, "Invalid URI [%s]: Allowed files must start with 'file:'\n",
-                    toml_allowed_file_str);
+            log_error("Invalid URI [%s]: Allowed files must start with 'file:'\n",
+                      toml_allowed_file_str);
             free(toml_allowed_file_str);
-            return -PAL_ERROR_INVAL;
+            ret = -PAL_ERROR_INVAL;
+            goto no_allowed;
         }
-        static_assert(sizeof(norm_path) > URI_PREFIX_FILE_LEN, "`normpath` is too small");
+        assert(norm_path_size > URI_PREFIX_FILE_LEN);
         memcpy(norm_path, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
 
-        size_t norm_path_len = sizeof(norm_path) - URI_PREFIX_FILE_LEN;
+        size_t norm_path_len = norm_path_size - URI_PREFIX_FILE_LEN;
 
         ret = get_norm_path(toml_allowed_file_str + URI_PREFIX_FILE_LEN,
                             norm_path + URI_PREFIX_FILE_LEN, &norm_path_len);
         free(toml_allowed_file_str);
 
         if (ret < 0) {
-            SGX_DBG(DBG_E, "Path (%s) normalization failed: %s\n",
-                    toml_allowed_file_str + URI_PREFIX_FILE_LEN, pal_strerror(-ret));
-            return ret;
+            log_error("Path (%s) normalization failed: %s\n",
+                      toml_allowed_file_str + URI_PREFIX_FILE_LEN, pal_strerror(ret));
+            goto no_allowed;
         }
 
         register_trusted_file(norm_path, NULL, /*check_duplicates=*/false);
     }
 
+    ret = 0;
+
 no_allowed:
-    return 0;
-}
-
-int init_trusted_children(void) {
-    int ret;
-
-    /* read sgx.trusted_children and corresponding sgx.trusted_mrenclave entries from manifest */
-    toml_table_t* manifest_sgx = toml_table_in(g_pal_state.manifest_root, "sgx");
-    if (!manifest_sgx)
-        return 0;
-
-    toml_table_t* toml_trusted_children = toml_table_in(manifest_sgx, "trusted_children");
-    if (!toml_trusted_children)
-        return 0;
-
-    ssize_t toml_trusted_children_cnt = toml_table_nkval(toml_trusted_children);
-    if (toml_trusted_children_cnt <= 0)
-        return 0;
-
-    toml_table_t* toml_trusted_mrenclaves = toml_table_in(manifest_sgx, "trusted_mrenclave");
-    if (!toml_trusted_mrenclaves) {
-        SGX_DBG(DBG_E, "No corresponding \'sgx.trusted_mrenclave\' to \'sgx.trusted_children\'\n");
-        return -PAL_ERROR_INVAL;
-    }
-
-    ssize_t toml_trusted_mrenclaves_cnt = toml_table_nkval(toml_trusted_mrenclaves);
-    if (toml_trusted_mrenclaves_cnt != toml_trusted_children_cnt) {
-        SGX_DBG(DBG_E, "No corresponding \'sgx.trusted_mrenclave\' to \'sgx.trusted_children\'\n");
-        return -PAL_ERROR_INVAL;
-    }
-
-    for (ssize_t i = 0; i < toml_trusted_mrenclaves_cnt; i++) {
-        const char* toml_trusted_mrenclave_key = toml_key_in(toml_trusted_mrenclaves, i);
-        assert(toml_trusted_mrenclave_key);
-        toml_raw_t toml_trusted_mrenclave_raw = toml_raw_in(toml_trusted_mrenclaves,
-                                                            toml_trusted_mrenclave_key);
-        assert(toml_trusted_mrenclave_raw);
-
-        /* find corresponding trusted_children from trusted_mrenclave */
-        toml_raw_t toml_trusted_child_raw = toml_raw_in(toml_trusted_children,
-                                                        toml_trusted_mrenclave_key);
-        if (!toml_trusted_child_raw) {
-            SGX_DBG(DBG_E, "No \'sgx.trusted_children.%s\' found\n", toml_trusted_mrenclave_key);
-            return -PAL_ERROR_INVAL;
-        }
-
-        char* toml_trusted_mrenclave_str = NULL;
-        ret = toml_rtos(toml_trusted_mrenclave_raw, &toml_trusted_mrenclave_str);
-        if (ret < 0) {
-            SGX_DBG(DBG_E, "Invalid trusted mrenclave in manifest: \'%s\'\n",
-                    toml_trusted_mrenclave_key);
-            return -PAL_ERROR_INVAL;
-        }
-
-        char* toml_trusted_child_str = NULL;
-        ret = toml_rtos(toml_trusted_child_raw, &toml_trusted_child_str);
-        if (ret < 0) {
-            SGX_DBG(DBG_E, "Invalid trusted child in manifest: \'%s\'\n",
-                    toml_trusted_mrenclave_key);
-            free(toml_trusted_mrenclave_str);
-            return -PAL_ERROR_INVAL;
-        }
-
-        ret = register_trusted_child(toml_trusted_child_str, toml_trusted_mrenclave_str);
-        free(toml_trusted_mrenclave_str);
-        free(toml_trusted_child_str);
-
-        if (ret < 0)
-            return ret;
-    }
-
-    return 0;
+    free(norm_path);
+    return ret;
 }
 
 int init_file_check_policy(void) {
@@ -974,8 +843,8 @@ int init_file_check_policy(void) {
     ret = toml_string_in(g_pal_state.manifest_root, "sgx.file_check_policy",
                          &file_check_policy_str);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Cannot parse \'sgx.file_check_policy\' "
-                       "(the value must be put in double quotes!)\n");
+        log_error("Cannot parse \'sgx.file_check_policy\' "
+                  "(the value must be put in double quotes!)\n");
         return -PAL_ERROR_INVAL;
     }
 
@@ -987,13 +856,13 @@ int init_file_check_policy(void) {
     } else if (!strcmp(file_check_policy_str, "allow_all_but_log")) {
         set_file_check_policy(FILE_CHECK_POLICY_ALLOW_ALL_BUT_LOG);
     } else {
-        SGX_DBG(DBG_E, "Unknown value for \'sgx.file_check_policy\' "
-                "(allowed: `strict`, `allow_all_but_log`)'\n");
+        log_error("Unknown value for \'sgx.file_check_policy\' "
+                  "(allowed: `strict`, `allow_all_but_log`)'\n");
         free(file_check_policy_str);
         return -PAL_ERROR_INVAL;
     }
 
-    SGX_DBG(DBG_S, "File check policy: %s\n", file_check_policy_str);
+    log_debug("File check policy: %s\n", file_check_policy_str);
     free(file_check_policy_str);
     return 0;
 }
@@ -1012,7 +881,7 @@ int init_enclave(void) {
                   "incompatible `reportdata` size");
     int ret = sgx_report(&targetinfo, &reportdata, &report);
     if (ret) {
-        SGX_DBG(DBG_E, "failed to get self report: %d\n", ret);
+        log_error("failed to get self report: %d\n", ret);
         return -PAL_ERROR_INVAL;
     }
 
@@ -1028,7 +897,7 @@ int init_enclave(void) {
     ret = _DkRandomBitsRead(&g_pal_enclave_state.enclave_id,
                             sizeof(g_pal_enclave_state.enclave_id));
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Failed to generate a random id: %d\n", ret);
+        log_error("Failed to generate a random id: %d\n", ret);
         return ret;
     }
 
@@ -1043,16 +912,18 @@ int _DkStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* key) {
     int64_t bytes;
     int64_t ret;
 
+    assert(IS_HANDLE_TYPE(stream, process));
+
     ret = lib_DhInit(&context);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Key Exchange: DH Init failed: %ld\n", ret);
+        log_error("Key Exchange: DH Init failed: %ld\n", ret);
         goto out_no_final;
     }
 
     pubsz = sizeof pub;
     ret = lib_DhCreatePublic(&context, pub, &pubsz);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Key Exchange: DH CreatePublic failed: %ld\n", ret);
+        log_error("Key Exchange: DH CreatePublic failed: %ld\n", ret);
         goto out;
     }
 
@@ -1073,7 +944,7 @@ int _DkStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* key) {
                 ret = 0;
                 continue;
             }
-            SGX_DBG(DBG_E, "Failed to exchange the secret key via RPC: %ld\n", ret);
+            log_error("Failed to exchange the secret key via RPC: %ld\n", ret);
             goto out;
         }
     }
@@ -1085,7 +956,7 @@ int _DkStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* key) {
                 ret = 0;
                 continue;
             }
-            SGX_DBG(DBG_E, "Failed to exchange the secret key via RPC: %ld\n", ret);
+            log_error("Failed to exchange the secret key via RPC: %ld\n", ret);
             goto out;
         }
     }
@@ -1093,7 +964,7 @@ int _DkStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* key) {
     agreesz = sizeof agree;
     ret = lib_DhCalcSecret(&context, pub, DH_SIZE, agree, &agreesz);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Key Exchange: DH CalcSecret failed: %ld\n", ret);
+        log_error("Key Exchange: DH CalcSecret failed: %ld\n", ret);
         goto out;
     }
 
@@ -1110,11 +981,11 @@ int _DkStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* key) {
     if ((ret = lib_SHA256Init(&sha)) < 0 ||
         (ret = lib_SHA256Update(&sha, agree, agreesz)) < 0 ||
         (ret = lib_SHA256Final(&sha, (uint8_t*)key)) < 0) {
-        SGX_DBG(DBG_E, "Failed to derive the session key: %ld\n", ret);
+        log_error("Failed to derive the session key: %ld\n", ret);
         goto out;
     }
 
-    SGX_DBG(DBG_S, "Key exchange succeeded: %s\n", ALLOCA_BYTES2HEXSTR(*key));
+    log_debug("Key exchange succeeded: %s\n", ALLOCA_BYTES2HEXSTR(*key));
     ret = 0;
 out:
     lib_DhFinal(&context);
@@ -1130,11 +1001,13 @@ out_no_final:
  * see comments in db_process.c).
  */
 int _DkStreamReportRequest(PAL_HANDLE stream, sgx_sign_data_t* data,
-                           check_mr_enclave_t check_mr_enclave) {
+                           mr_enclave_check_t is_mr_enclave_ok) {
     __sgx_mem_aligned sgx_target_info_t target_info;
     __sgx_mem_aligned sgx_report_t report;
     uint64_t bytes;
     int64_t ret;
+
+    assert(IS_HANDLE_TYPE(stream, process));
 
     /* A -> B: targetinfo[A] */
     memset(&target_info, 0, sizeof(target_info));
@@ -1149,7 +1022,7 @@ int _DkStreamReportRequest(PAL_HANDLE stream, sgx_sign_data_t* data,
                 ret = 0;
                 continue;
             }
-            SGX_DBG(DBG_E, "Failed to send target info via RPC: %ld\n", ret);
+            log_error("Failed to send target info via RPC: %ld\n", ret);
             goto out;
         }
     }
@@ -1162,38 +1035,30 @@ int _DkStreamReportRequest(PAL_HANDLE stream, sgx_sign_data_t* data,
                 ret = 0;
                 continue;
             }
-            SGX_DBG(DBG_E, "Failed to receive local report via RPC: %ld\n", ret);
+            log_error("Failed to receive local report via RPC: %ld\n", ret);
             goto out;
         }
     }
 
-    SGX_DBG(DBG_S, "Received local report (mr_enclave = %s)\n",
-            ALLOCA_BYTES2HEXSTR(report.body.mr_enclave.m));
+    log_debug("Received local report (mr_enclave = %s)\n",
+              ALLOCA_BYTES2HEXSTR(report.body.mr_enclave.m));
 
     /* Verify report[B -> A] */
     ret = sgx_verify_report(&report);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Failed to verify local report: %ld\n", ret);
+        log_error("Failed to verify local report: %ld\n", ret);
         goto out;
     }
 
     struct pal_enclave_state* remote_state = (void*)&report.body.report_data;
-    ret = check_mr_enclave(stream, &report.body.mr_enclave, remote_state);
-    if (ret < 0) {
-        SGX_DBG(DBG_E, "Failed to check local report: %ld\n", ret);
-        goto out;
-    }
-
-    if (ret == 1) {
-        SGX_DBG(DBG_E,
-                "Not an allowed enclave (mr_enclave = %s). Maybe missing 'sgx.trusted_children' in "
-                "the manifest file?\n",
-                ALLOCA_BYTES2HEXSTR(report.body.mr_enclave.m));
+    if (!is_mr_enclave_ok(stream, &report.body.mr_enclave, remote_state)) {
+        log_error("Not an allowed enclave (mr_enclave = %s)\n",
+                  ALLOCA_BYTES2HEXSTR(report.body.mr_enclave.m));
         ret = -PAL_ERROR_DENIED;
         goto out;
     }
 
-    SGX_DBG(DBG_S, "Local attestation succeeded!\n");
+    log_debug("Local attestation succeeded!\n");
 
     /* A -> B: report[A -> B] */
     memcpy(&target_info.mr_enclave, &report.body.mr_enclave, sizeof(sgx_measurement_t));
@@ -1201,7 +1066,7 @@ int _DkStreamReportRequest(PAL_HANDLE stream, sgx_sign_data_t* data,
 
     ret = __sgx_get_report(&target_info, data, &report);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Failed to get local report from CPU: %ld\n", ret);
+        log_error("Failed to get local report from CPU: %ld\n", ret);
         goto out;
     }
 
@@ -1212,7 +1077,7 @@ int _DkStreamReportRequest(PAL_HANDLE stream, sgx_sign_data_t* data,
                 ret = 0;
                 continue;
             }
-            SGX_DBG(DBG_E, "Failed to send local report via RPC: %ld\n", ret);
+            log_error("Failed to send local report via RPC: %ld\n", ret);
             goto out;
         }
     }
@@ -1220,7 +1085,7 @@ int _DkStreamReportRequest(PAL_HANDLE stream, sgx_sign_data_t* data,
     return 0;
 
 out:
-    DkStreamDelete(stream, 0);
+    _DkStreamDelete(stream, 0);
     return ret;
 }
 
@@ -1232,11 +1097,14 @@ out:
  * see comments in db_process.c).
  */
 int _DkStreamReportRespond(PAL_HANDLE stream, sgx_sign_data_t* data,
-                           check_mr_enclave_t check_mr_enclave) {
+                           mr_enclave_check_t is_mr_enclave_ok) {
     __sgx_mem_aligned sgx_target_info_t target_info;
     __sgx_mem_aligned sgx_report_t report;
     uint64_t bytes;
     int64_t ret;
+
+    assert(IS_HANDLE_TYPE(stream, process));
+
     memset(&target_info, 0, sizeof(target_info));
 
     /* A -> B: targetinfo[A] */
@@ -1248,7 +1116,7 @@ int _DkStreamReportRespond(PAL_HANDLE stream, sgx_sign_data_t* data,
                 ret = 0;
                 continue;
             }
-            SGX_DBG(DBG_E, "Failed to receive target info via RPC: %ld\n", ret);
+            log_error("Failed to receive target info via RPC: %ld\n", ret);
             goto out;
         }
     }
@@ -1256,7 +1124,7 @@ int _DkStreamReportRespond(PAL_HANDLE stream, sgx_sign_data_t* data,
     /* B -> A: report[B -> A] */
     ret = __sgx_get_report(&target_info, data, &report);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Failed to get local report from CPU: %ld\n", ret);
+        log_error("Failed to get local report from CPU: %ld\n", ret);
         goto out;
     }
 
@@ -1267,7 +1135,7 @@ int _DkStreamReportRespond(PAL_HANDLE stream, sgx_sign_data_t* data,
                 ret = 0;
                 continue;
             }
-            SGX_DBG(DBG_E, "Failed to send local report via PRC: %ld\n", ret);
+            log_error("Failed to send local report via PRC: %ld\n", ret);
             goto out;
         }
     }
@@ -1280,42 +1148,34 @@ int _DkStreamReportRespond(PAL_HANDLE stream, sgx_sign_data_t* data,
                 ret = 0;
                 continue;
             }
-            SGX_DBG(DBG_E, "Failed to receive local report via RPC: %ld\n", ret);
+            log_error("Failed to receive local report via RPC: %ld\n", ret);
             goto out;
         }
     }
 
-    SGX_DBG(DBG_S, "Received local report (mr_enclave = %s)\n",
+    log_debug("Received local report (mr_enclave = %s)\n",
             ALLOCA_BYTES2HEXSTR(report.body.mr_enclave.m));
 
     /* Verify report[A -> B] */
     ret = sgx_verify_report(&report);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Failed to verify local report: %ld\n", ret);
+        log_error("Failed to verify local report: %ld\n", ret);
         goto out;
     }
 
     struct pal_enclave_state* remote_state = (void*)&report.body.report_data;
-    ret = check_mr_enclave(stream, &report.body.mr_enclave, remote_state);
-    if (ret < 0) {
-        SGX_DBG(DBG_E, "Failed to check mr_enclave: %ld\n", ret);
-        goto out;
-    }
-
-    if (ret == 1) {
-        SGX_DBG(DBG_E,
-                "Not an allowed enclave (mr_enclave = %s). Maybe missing 'sgx.trusted_children' in "
-                "the manifest file?\n",
-                ALLOCA_BYTES2HEXSTR(report.body.mr_enclave.m));
+    if (!is_mr_enclave_ok(stream, &report.body.mr_enclave, remote_state)) {
+        log_error("Not an allowed enclave (mr_enclave = %s)\n",
+                  ALLOCA_BYTES2HEXSTR(report.body.mr_enclave.m));
         ret = -PAL_ERROR_DENIED;
         goto out;
     }
 
-    SGX_DBG(DBG_S, "Local attestation succeeded!\n");
+    log_debug("Local attestation succeeded!\n");
     return 0;
 
 out:
-    DkStreamDelete(stream, 0);
+    _DkStreamDelete(stream, 0);
     return ret;
 }
 

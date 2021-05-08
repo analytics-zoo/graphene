@@ -31,19 +31,21 @@ static int create_pipes(struct shim_handle* srv, struct shim_handle* cli, int fl
 
     if ((ret = create_pipe(name, uri, PIPE_URI_SIZE, &hdl0, qstr,
                            /*use_vmid_for_name=*/false)) < 0) {
-        debug("pipe creation failure\n");
+        log_error("pipe creation failure\n");
         return ret;
     }
 
-    if (!(hdl2 = DkStreamOpen(uri, 0, 0, 0, LINUX_OPEN_FLAGS_TO_PAL_OPTIONS(flags)))) {
-        ret = -PAL_ERRNO();
-        debug("pipe connection failure\n");
+    ret = DkStreamOpen(uri, 0, 0, 0, LINUX_OPEN_FLAGS_TO_PAL_OPTIONS(flags), &hdl2);
+    if (ret < 0) {
+        ret = pal_to_unix_errno(ret);
+        log_error("pipe connection failure\n");
         goto out;
     }
 
-    if (!(hdl1 = DkStreamWaitForClient(hdl0))) {
-        ret = -PAL_ERRNO();
-        debug("pipe acception failure\n");
+    ret = DkStreamWaitForClient(hdl0, &hdl1);
+    if (ret < 0) {
+        ret = pal_to_unix_errno(ret);
+        log_error("pipe acceptance failure\n");
         goto out;
     }
 
@@ -52,7 +54,7 @@ static int create_pipes(struct shim_handle* srv, struct shim_handle* cli, int fl
 
     if (flags & O_NONBLOCK) {
         /* `cli` - `hdl2` - has this flag already set by the call to `DkStreamOpen`. */
-        ret = set_handle_nonblocking(srv);
+        ret = set_handle_nonblocking(srv, /*on=*/true);
         if (ret < 0) {
             /* Restore original handle, if any. */
             srv->pal_handle = tmp;
@@ -70,7 +72,7 @@ out:
         if (hdl2)
             DkObjectClose(hdl2);
     }
-    DkStreamDelete(hdl0, 0);
+    DkStreamDelete(hdl0, 0); // TODO: handle errors
     DkObjectClose(hdl0);
     return ret;
 }
@@ -87,7 +89,7 @@ long shim_do_pipe2(int* filedes, int flags) {
     int ret = 0;
 
     if (flags & O_DIRECT) {
-        debug("shim_do_pipe2(): ignoring a not supported O_DIRECT flag\n");
+        log_warning("shim_do_pipe2(): ignoring not supported O_DIRECT flag\n");
         flags &= ~O_DIRECT;
     }
 
@@ -95,7 +97,7 @@ long shim_do_pipe2(int* filedes, int flags) {
         return -EINVAL;
     }
 
-    if (!filedes || test_user_memory(filedes, 2 * sizeof(int), true))
+    if (test_user_memory(filedes, 2 * sizeof(int), true))
         return -EFAULT;
 
     int vfd1 = -1;
@@ -170,7 +172,7 @@ long shim_do_socketpair(int domain, int type, int protocol, int* sv) {
     if ((type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) != SOCK_STREAM)
         return -EPROTONOSUPPORT;
 
-    if (!sv || test_user_memory(sv, 2 * sizeof(int), true))
+    if (test_user_memory(sv, 2 * sizeof(int), true))
         return -EFAULT;
 
     int vfd1 = -1;
@@ -184,13 +186,13 @@ long shim_do_socketpair(int domain, int type, int protocol, int* sv) {
         goto out;
     }
 
-    struct shim_sock_handle* sock1 = &hdl1->info.sock;
-    struct shim_sock_handle* sock2 = &hdl2->info.sock;
 
     hdl1->type = TYPE_SOCK;
     set_handle_fs(hdl1, &socket_builtin_fs);
     hdl1->flags       = O_RDONLY;
     hdl1->acc_mode    = MAY_READ | MAY_WRITE;
+
+    struct shim_sock_handle* sock1 = &hdl1->info.sock;
     sock1->domain     = domain;
     sock1->sock_type  = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
     sock1->protocol   = protocol;
@@ -200,6 +202,8 @@ long shim_do_socketpair(int domain, int type, int protocol, int* sv) {
     set_handle_fs(hdl2, &socket_builtin_fs);
     hdl2->flags       = O_WRONLY;
     hdl2->acc_mode    = MAY_READ | MAY_WRITE;
+
+    struct shim_sock_handle* sock2 = &hdl2->info.sock;
     sock2->domain     = domain;
     sock2->sock_type  = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
     sock2->protocol   = protocol;
@@ -279,17 +283,12 @@ long shim_do_mknodat(int dirfd, const char* pathname, mode_t mode, dev_t dev) {
     if (*pathname != '/' && (ret = get_dirfd_dentry(dirfd, &dir)) < 0)
         goto out;
 
-    ret = path_lookupat(dir, pathname, LOOKUP_CREATE, &dent, NULL);
-    if (ret < 0 && ret != -ENOENT) {
+    ret = path_lookupat(dir, pathname, LOOKUP_NO_FOLLOW | LOOKUP_CREATE, &dent);
+    if (ret < 0) {
         goto out;
     }
 
-    if (!dent) {
-        ret = -ENOENT; /* impossible path, file cannot be created, mknod must return ENOENT */
-        goto out;
-    }
-
-    if (dent->state & DENTRY_VALID && !(dent->state & DENTRY_NEGATIVE)) {
+    if (!(dent->state & DENTRY_NEGATIVE)) {
         ret = -EEXIST;
         goto out;
     }

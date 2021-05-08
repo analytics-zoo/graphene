@@ -130,6 +130,8 @@ typedef ptrdiff_t ssize_t;
     } while (0)
 #define static_strlen(str) (ARRAY_SIZE(FORCE_LITERAL_CSTR(str)) - 1)
 
+#define IS_IN_RANGE_INCL(value, start, end) (((value) < (start) || (value) > (end)) ? false : true)
+
 /* LibC functions */
 
 /* LibC string functions */
@@ -140,6 +142,12 @@ int strcmp(const char* lhs, const char* rhs);
 
 long strtol(const char* s, char** endptr, int base);
 long long strtoll(const char* s, char** endptr, int base);
+/* Converts a string to an unsigned long value. "+" and "-" signs are not allowed in the string.
+ * Return value indicates whether int overflow happened. If out_value is not NULL, then it contains
+ * the result of conversion (or ULONG_MAX if int overflow happened). If out_endptr is not NULL, then
+ * it contains the address of the first invalid char in str (or the original value of str if there
+ * were no digits at all). */
+bool str_to_ulong(const char* str, int base, unsigned long* out_value, char** out_endptr);
 int atoi(const char* nptr);
 long int atol(const char* nptr);
 
@@ -157,6 +165,11 @@ void* memcpy(void* restrict dest, const void* restrict src, size_t count);
 void* memmove(void* dest, const void* src, size_t count);
 void* memset(void* dest, int ch, size_t count);
 int memcmp(const void* lhs, const void* rhs, size_t count);
+
+/* Used by _FORTIFY_SOURCE */
+void* __memcpy_chk(void* restrict dest, const void* restrict src, size_t count, size_t dest_count);
+void* __memmove_chk(void* dest, const void* src, size_t count, size_t dest_count);
+void* __memset_chk(void* dest, int ch, size_t count, size_t dest_count);
 
 bool strstartswith(const char* str, const char* prefix);
 bool strendswith(const char* str, const char* suffix);
@@ -196,34 +209,69 @@ void* calloc(size_t nmemb, size_t size);
 
 #define COMPILER_BARRIER() ({ __asm__ __volatile__("" ::: "memory"); })
 
-/* Idea taken from: https://elixir.bootlin.com/linux/v5.6/source/include/linux/compiler.h */
-#define READ_ONCE(x)                            \
-    ({                                          \
-        __typeof__(x) _y;                       \
-        COMPILER_BARRIER();                     \
-        __builtin_memcpy(&_y, &(x), sizeof(x)); \
-        COMPILER_BARRIER();                     \
-        _y;                                     \
-    })
+/* We need this artificial assignment in READ_ONCE because of a GCC bug:
+ * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=99258
+ */
+#define READ_ONCE(x) ({ __typeof__(x) y = *(volatile __typeof__(x)*)&(x); y;})
 
-#define WRITE_ONCE(x, y)                        \
-    ({                                          \
-        __typeof__(x) _y = (__typeof__(x))(y);  \
-        COMPILER_BARRIER();                     \
-        __builtin_memcpy(&(x), &_y, sizeof(x)); \
-        COMPILER_BARRIER();                     \
-        _y;                                     \
-    })
+#define WRITE_ONCE(x, y) do { *(volatile __typeof__(x)*)&(x) = (y); } while (0)
 
-/* Libc printf functions. stdio.h/stdarg.h. */
-void fprintfmt(int (*_fputch)(void*, int, void*), void* f, void* putdat, const char* fmt, ...)
-    __attribute__((format(printf, 4, 5)));
+/* Printf family of functions. */
 
-void vfprintfmt(int (*_fputch)(void*, int, void*), void* f, void* putdat, const char* fmt,
-                va_list ap) __attribute__((format(printf, 4, 0)));
+/* Generic function, taking an "output single character" callback. Returns 0 or negative error
+ * code (from the `_fputc` callback). */
+int vfprintfmt(int (*_fputc)(char c, void* arg), void* arg, const char* fmt, va_list ap)
+    __attribute__((format(printf, 3, 0)));
 
-int vsnprintf(char* buf, size_t n, const char* fmt, va_list ap);
-int snprintf(char* buf, size_t n, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+int vsnprintf(char* buf, size_t buf_size, const char* fmt, va_list ap)
+    __attribute__((format(printf, 3, 0)));
+int snprintf(char* buf, size_t buf_size, const char* fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+
+/* Used by _FORTIFY_SOURCE */
+int __vsnprintf_chk(char* buf, size_t buf_size, int flag, size_t real_size, const char* fmt,
+                    va_list ap)
+    __attribute__((format(printf, 5, 0)));
+int __snprintf_chk(char* buf, size_t buf_size, int flag, size_t real_size, const char* fmt, ...)
+    __attribute__((format(printf, 5, 6)));
+
+/*
+ * Buffered printing. The print_buf structure holds PRINT_BUF_SIZE characters, and outputs them
+ * (using `buf_write_all` callback) when `buf_flush()` is called, or when the buffer overflows.
+ *
+ *     static int buf_write_all(const char* str, size_t size, void* arg) { ... }
+ *
+ *     struct print_buf buf = INIT_PRINT_BUF(buf_write_all);
+ *     buf_puts(&buf, str);
+ *     buf_printf(&buf, fmt, ...);
+ *     buf_flush(&buf);
+ *
+ * The `buf_*` functions always return 0, or a negative error code (if one was returned from the
+ * `write_all` callback).
+ */
+
+#define PRINT_BUF_SIZE 256
+
+struct print_buf {
+    char data[PRINT_BUF_SIZE];
+    size_t pos;
+    void* arg;
+    int (*buf_write_all)(const char* str, size_t size, void* arg);
+};
+
+#define INIT_PRINT_BUF_ARG(_buf_write_all, _arg) \
+    { .pos = 0, .arg = (_arg), .buf_write_all = (_buf_write_all) }
+#define INIT_PRINT_BUF(_buf_write_all) \
+    { .pos = 0, .arg = NULL, .buf_write_all = (_buf_write_all) }
+
+int buf_vprintf(struct print_buf* buf, const char* fmt, va_list ap)
+    __attribute__((format(printf, 2, 0)));
+int buf_printf(struct print_buf* buf, const char* fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+int buf_puts(struct print_buf* buf, const char* str);
+int buf_putc(struct print_buf* buf, char c);
+int buf_flush(struct print_buf* buf);
 
 /* Miscelleneous */
 
@@ -319,6 +367,9 @@ int toml_sizestring_in(const toml_table_t* root, const char* key, uint64_t defau
 
 #define URI_PREFIX_FILE_LEN (static_strlen(URI_PREFIX_FILE))
 
+#define TIME_US_IN_S 1000000ul
+#define TIME_NS_IN_US 1000ul
+
 #ifdef __x86_64__
 static inline bool __range_not_ok(uintptr_t addr, size_t size) {
     addr += size;
@@ -338,5 +389,9 @@ static inline bool access_ok(const volatile void* addr, size_t size) {
 #else
 #error "Unsupported architecture"
 #endif /* __x86_64__ */
+
+#if !defined(USE_STDLIB) && __USE_FORTIFY_LEVEL > 0
+# include "api_fortified.h"
+#endif
 
 #endif /* API_H */

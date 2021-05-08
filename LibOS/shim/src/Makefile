@@ -48,25 +48,28 @@ defs	= -DIN_SHIM
 CFLAGS += $(defs)
 ASFLAGS += $(defs)
 
+arch_objs = \
+	shim_arch_prctl.o \
+	shim_context.o \
+	shim_table.o \
+	start.o \
+	syscallas.o
+
 objs = \
 	shim_async.o \
 	shim_checkpoint.o \
-	shim_context-$(ARCH).o \
 	shim_debug.o \
 	shim_init.o \
 	shim_malloc.o \
 	shim_object.o \
 	shim_parser.o \
+	shim_rtld.o \
 	shim_syscalls.o \
-	shim_table-$(ARCH).o \
-	start-$(ARCH).o \
-	syscallas-$(ARCH).o \
 	bookkeep/shim_handle.o \
 	bookkeep/shim_process.o \
 	bookkeep/shim_signal.o \
 	bookkeep/shim_thread.o \
 	bookkeep/shim_vma.o \
-	elf/shim_rtld.o \
 	fs/shim_dcache.o \
 	fs/shim_fs.o \
 	fs/shim_fs_hash.o \
@@ -87,6 +90,11 @@ objs = \
 	fs/proc/thread.o \
 	fs/socket/fs.o \
 	fs/str/fs.o \
+	fs/sys/cache_info.o \
+	fs/sys/cpu_info.o \
+	fs/sys/fs.o \
+	fs/sys/node_info.o \
+	fs/tmpfs/fs.o \
 	ipc/shim_ipc.o \
 	ipc/shim_ipc_child.o \
 	ipc/shim_ipc_helper.o \
@@ -127,14 +135,15 @@ objs = \
 	sys/shim_uname.o \
 	sys/shim_wait.o \
 	sys/shim_wrappers.o \
-	utils/printf.o \
+	utils/log.o \
 	utils/strobjs.o \
-	vdso/vdso-data.o
+	vdso/vdso-data.o \
+	$(addprefix arch/$(ARCH)/,$(arch_objs))
 
 all_objs = \
 	$(objs) \
 	vdso/vdso-note.o \
-	vdso/vdso.o
+	vdso/arch/$(ARCH)/vdso.o
 
 graphene_lib = .lib/graphene-lib.a
 pal_lib = $(RUNTIME_DIR)/libpal-$(PAL_HOST).so
@@ -152,9 +161,9 @@ endif
 $(files_to_install): $(RUNTIME_DIR)/%: %
 	$(call cmd,ln_sfr)
 
-LDFLAGS-libsysdb.so += --version-script shim.map -T shim-$(ARCH).lds --eh-frame-hdr
+LDFLAGS-libsysdb.so += --version-script shim.map -T arch/$(ARCH)/shim.lds --eh-frame-hdr
 libsysdb.so: $(objs) $(filter %.map %.lds,$(LDFLAGS-$@)) \
-	     $(graphene_lib) $(pal_lib) shim.map shim-$(ARCH).lds
+	     $(graphene_lib) $(pal_lib) shim.map arch/$(ARCH)/shim.lds
 	$(call cmd,ld_so_o)
 
 .PHONY: graphene_lib_recurse
@@ -182,7 +191,11 @@ libsysdb.a: $(objs)
 %.s: %.S
 	$(call cmd,cpp_s_S)
 
-syscallas-$(ARCH).S shim_context-$(ARCH).c: asm-offsets.h
+arch/$(ARCH)/asm-offsets.h: asm-offsets.h
+	ln -fs ../../$^ arch/$(ARCH)/asm-offsets.h
+CLEAN_FILES += arch/$(ARCH)/asm-offsets.h
+
+arch/$(ARCH)/syscallas.S arch/$(ARCH)/shim_context.c: arch/$(ARCH)/asm-offsets.h
 
 include ../../../Scripts/Makefile.rules
 
@@ -190,16 +203,16 @@ LDFLAGS-vdso/vdso.so.dbg = -nostdlib -shared \
 	--hash-style=both --build-id -Bsymbolic \
 	-m elf_x86_64 --no-undefined \
 	-z max-page-size=4096 -z common-page-size=4096 \
-	-T vdso/vdso-$(ARCH).lds -soname linux-vdso.so.1
+	-T vdso/arch/$(ARCH)/vdso.lds -soname linux-vdso.so.1
 vdso/vdso.so.dbg: LDFLAGS =
-vdso/vdso.so.dbg: vdso/vdso-$(ARCH).lds vdso/vdso.o vdso/vdso-note.o | vdso/.vdso-no-reloc-checked
+vdso/vdso.so.dbg: vdso/arch/$(ARCH)/vdso.lds vdso/arch/$(ARCH)/vdso.o vdso/vdso-note.o | vdso/.vdso-no-reloc-checked
 	$(call cmd,ld)
 
 # vdso.so is required to have no relocations. This rule checks it.
 # Use default linker script to retain relocations if exist.
 LDFLAGS-vdso/.vdso-linked-for-reloc-check.so = -nostdlib -shared -Bsymbolic
 vdso/.vdso-linked-for-reloc-check.so: LDFLAGS =
-vdso/.vdso-linked-for-reloc-check.so: vdso/vdso.o
+vdso/.vdso-linked-for-reloc-check.so: vdso/arch/$(ARCH)/vdso.o
 	$(call cmd,ld)
 
 vdso/.vdso-no-reloc-checked: vdso/.vdso-linked-for-reloc-check.so

@@ -23,10 +23,7 @@ struct pal_sec {
     /* remaining heap usable by application */
     PAL_PTR heap_min, heap_max;
 
-    /* executable name, addr and size */
-    PAL_SEC_STR exec_name;
-    PAL_PTR     exec_addr;
-    PAL_NUM     exec_size;
+    PAL_SEC_STR exec_name; // It's actually URI, not name. TODO: rename and migrate to LibOS.
 
     /* child's stream FD created and sent over by parent */
     PAL_IDX stream_fd;
@@ -35,8 +32,10 @@ struct pal_sec {
     PAL_SEC_STR pipe_prefix;
 
     PAL_NUM online_logical_cores;
+    PAL_NUM possible_logical_cores;
     PAL_NUM physical_cores_per_socket;
     int* cpu_socket;
+    PAL_TOPO_INFO topo_info;
 
 #ifdef DEBUG
     PAL_BOL in_gdb;

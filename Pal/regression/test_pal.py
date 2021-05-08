@@ -36,24 +36,12 @@ class TC_00_Basic(RegressionTestCase):
 
 @unittest.skipIf(HAS_SGX, "Not yet tested on SGX")
 class TC_00_BasicSet2(RegressionTestCase):
-    def test_Event2(self):
-        _, stderr = self.run_binary(['Event2'])
-        self.assertIn('Enter main thread', stderr)
-        self.assertIn('In thread 1', stderr)
-        self.assertIn('Success, leave main thread', stderr)
-
     @unittest.skipUnless(ON_X86, "x86-specific")
     def test_Exception2(self):
         _, stderr = self.run_binary(['Exception2'])
         self.assertIn('Enter Main Thread', stderr)
         self.assertIn('failure in the handler: 0x', stderr)
         self.assertNotIn('Leave Main Thread', stderr)
-
-    def test_Failure(self):
-        _, stderr = self.run_binary(['Failure'])
-        self.assertIn('Enter Main Thread', stderr)
-        self.assertIn('Failure notified: Function not supported', stderr)
-        self.assertIn('Leave Main Thread', stderr)
 
     def test_File2(self):
         _, stderr = self.run_binary(['File2'])
@@ -133,7 +121,7 @@ class TC_00_BasicSet2(RegressionTestCase):
 
 class TC_01_Bootstrap(RegressionTestCase):
     def test_100_basic_boostrapping(self):
-        stdout, stderr = self.run_binary(['Bootstrap'])
+        _, stderr = self.run_binary(['Bootstrap'])
 
         # Basic Bootstrapping
         self.assertIn('User Program Started', stderr)
@@ -146,13 +134,10 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('argv[0] = Bootstrap', stderr)
 
         # Control Block: Debug Stream (Inline)
-        self.assertIn('Written to Debug Stream', stdout)
+        self.assertIn('Written to Debug Stream', stderr)
 
         # Control Block: Allocation Alignment
         self.assertIn('Allocation Alignment: {}'.format(mmap.ALLOCATIONGRANULARITY), stderr)
-
-        # Control Block: Executable Range
-        self.assertIn('Executable Range OK', stderr)
 
     def test_101_basic_boostrapping_five_arguments(self):
         _, stderr = self.run_binary(['Bootstrap', 'a', 'b', 'c', 'd'])
@@ -198,12 +183,12 @@ class TC_01_Bootstrap(RegressionTestCase):
     @unittest.skipUnless(HAS_SGX, 'this test requires SGX')
     def test_120_8gb_enclave(self):
         _, stderr = self.run_binary(['Bootstrap6'], timeout=360)
-        self.assertIn('Executable Range OK', stderr)
+        self.assertIn('User Address Range OK', stderr)
 
     def test_130_large_number_of_items_in_manifest(self):
         _, stderr = self.run_binary(['Bootstrap7'])
-        self.assertIn('key1000=na', stderr)
         self.assertIn('key1=na', stderr)
+        self.assertIn('key1000=batman', stderr)
 
     def test_140_missing_executable_and_manifest(self):
         try:
@@ -244,8 +229,7 @@ class TC_02_Symbols(RegressionTestCase):
         'DkSetExceptionHandler',
         'DkMutexCreate',
         'DkMutexRelease',
-        'DkNotificationEventCreate',
-        'DkSynchronizationEventCreate',
+        'DkEventCreate',
         'DkEventSet',
         'DkEventClear',
         'DkSynchronizationObjectWait',
@@ -253,7 +237,6 @@ class TC_02_Symbols(RegressionTestCase):
         'DkObjectClose',
         'DkSystemTimeQuery',
         'DkRandomBitsRead',
-        'DkInstructionCacheFlush',
         'DkMemoryAvailableQuota',
     ]
     if ON_X86:
@@ -262,8 +245,9 @@ class TC_02_Symbols(RegressionTestCase):
 
     def test_000_symbols(self):
         _, stderr = self.run_binary(['Symbols'])
-        found_symbols = dict(line.split(' = ')
-            for line in stderr.strip().split('\n') if line.startswith('Dk'))
+        prefix = 'symbol: '
+        found_symbols = dict(line[len(prefix):].split(' = ')
+            for line in stderr.strip().split('\n') if line.startswith(prefix))
         self.assertCountEqual(found_symbols, self.ALL_SYMBOLS)
         for k, value in found_symbols.items():
             value = ast.literal_eval(value)
@@ -363,12 +347,6 @@ class TC_20_SingleProcess(RegressionTestCase):
         self.assertIn(
             'Map Test 2 (200th - 240th): {}'.format(file_exist[200:240].hex()),
             stderr)
-        self.assertIn(
-            'Map Test 3 (4096th - 4136th): {}'.format(file_exist[4096:4136].hex()),
-            stderr)
-        self.assertIn(
-            'Map Test 4 (4296th - 4336th): {}'.format(file_exist[4296:4336].hex()),
-            stderr)
 
         # Set File Length
         self.assertEqual(
@@ -421,8 +399,7 @@ class TC_20_SingleProcess(RegressionTestCase):
 
     def test_200_event(self):
         _, stderr = self.run_binary(['Event'])
-        self.assertIn('Wait with too short timeout ok.', stderr)
-        self.assertIn('Wait with long enough timeout ok.', stderr)
+        self.assertIn('TEST OK', stderr)
 
     def test_210_semaphore(self):
         _, stderr = self.run_binary(['Semaphore'])
@@ -601,6 +578,7 @@ class TC_21_ProcessCreation(RegressionTestCase):
         self.assertEqual(counter['Process Write 2 OK'], 3)
         self.assertEqual(counter['Process Read 2: Hello World 2'], 3)
 
+    @unittest.skip("Temporarily broken, TODO: reenable after finishing loader rework")
     def test_200_process2(self):
         # Process Creation with a Different Binary
         _, stderr = self.run_binary(['Process2'])

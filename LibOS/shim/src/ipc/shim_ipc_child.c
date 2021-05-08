@@ -26,12 +26,13 @@ void ipc_port_with_child_fini(struct shim_ipc_port* port, IDTYPE vmid) {
      * NOTE: IPC port may be closed by the host OS because the child process exited on the host OS
      * (and so the host OS closed all its sockets). This may happen before arrival of the expected
      * IPC_MSG_CHILDEXIT message from child process. In such case report that the child process was
-     * killed by SIGKILL.
+     * killed by SIGPWR (we've picked this signal hoping that nothing really uses it, as this case
+     * is not distinguishable from a genuine signal).
      */
-    if (mark_child_exited_by_vmid(vmid, /*uid=*/0, /*exit_code=*/0, SIGKILL)) {
-        debug("Child process (vmid: 0x%x) got disconnected\n", vmid & 0xffff);
+    if (mark_child_exited_by_vmid(vmid, /*uid=*/0, /*exit_code=*/0, SIGPWR)) {
+        log_debug("Child process (vmid: 0x%x) got disconnected\n", vmid);
     } else {
-        debug("Unknown process (vmid: 0x%x) disconnected\n", vmid & 0xffff);
+        log_debug("Unknown process (vmid: 0x%x) disconnected\n", vmid);
     }
 }
 
@@ -78,16 +79,16 @@ int ipc_cld_exit_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) 
     __UNUSED(port);
     struct shim_ipc_cld_exit* msgin = (struct shim_ipc_cld_exit*)&msg->msg;
 
-    debug("IPC callback from %u: IPC_MSG_CHILDEXIT(%u, %u, %d, %u)\n", msg->src & 0xFFFF,
+    log_debug("IPC callback from %u: IPC_MSG_CHILDEXIT(%u, %u, %d, %u)\n", msg->src,
           msgin->ppid, msgin->pid, msgin->exitcode, msgin->term_signal);
 
     /* Message cannot come from our own process. */
     assert(msg->src != g_process_ipc_info.vmid);
 
     if (mark_child_exited_by_pid(msgin->pid, msgin->uid, msgin->exitcode, msgin->term_signal)) {
-        debug("Child process (pid: %u) died\n", msgin->pid);
+        log_debug("Child process (pid: %u) died\n", msgin->pid);
     } else {
-        debug("Unknown process died, pid: %d\n", msgin->pid);
+        log_debug("Unknown process died, pid: %d\n", msgin->pid);
     }
 
     return 0;

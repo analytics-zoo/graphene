@@ -1,9 +1,6 @@
 /*.manifest
 /*.xml
 
-/manifest
-/pal_loader
-
 /.cache
 /abort
 /abort_multithread
@@ -11,7 +8,7 @@
 /argv_test_input
 /attestation
 /bootstrap
-/bootstrap_c++
+/bootstrap_cpp
 /bootstrap_pie
 /bootstrap_static
 /cpuid
@@ -21,8 +18,10 @@
 /debug_regs-x86_64
 /dev
 /device
+/double_fork
 /env_from_file
 /env_from_host
+/epoll_epollet
 /epoll_wait_timeout
 /eventfd
 /exec
@@ -50,10 +49,13 @@
 /getdents
 /getsockname
 /getsockopt
+/gettimeofday
 /groups
+/helloworld
 /host_root_fs
 /init_fail
 /init_fail2
+/kill_all
 /large_dir_read
 /large_mmap
 /madvise
@@ -93,6 +95,7 @@
 /stat_invalid_args
 /str_close_leak
 /syscall
+/sysfs_common
 /tcp_ipv6_v6only
 /tcp_msg_peek
 /testfile

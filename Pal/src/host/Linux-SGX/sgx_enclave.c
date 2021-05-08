@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 
 #include "cpu.h"
+#include "debug_map.h"
 #include "ecall_types.h"
 #include "linux_utils.h"
 #include "ocall_types.h"
@@ -23,6 +24,7 @@
 #include "pal_security.h"
 #include "rpc_queue.h"
 #include "sgx_internal.h"
+#include "sgx_log.h"
 #include "sgx_tls.h"
 #include "sigset.h"
 
@@ -34,34 +36,9 @@ static long sgx_ocall_exit(void* pms) {
     ms_ocall_exit_t* ms = (ms_ocall_exit_t*)pms;
     ODEBUG(OCALL_EXIT, NULL);
 
-    if (ms->ms_is_exitgroup && ms->ms_exitcode == PAL_WAIT_FOR_CHILDREN_EXIT) {
-        /* this is a "temporary" process exiting after execve'ing a child process: it must still
-         * be around until the child finally exits (because its parent in turn may wait on it) */
-        SGX_DBG(DBG_I, "Temporary process exits after emulating execve, wait for child to exit\n");
-
-        int wstatus;
-        int ret = INLINE_SYSCALL(wait4, 4, /*any child*/ -1, &wstatus, /*options=*/0,
-                                 /*rusage=*/NULL);
-        if (IS_ERR(ret)) {
-            /* it's too late to recover from errors, just log it and set some reasonable exit code
-             */
-            SGX_DBG(DBG_I, "Temporary process waited for child to exit but received error %d\n",
-                    ret);
-            ms->ms_exitcode = ECHILD;
-        } else {
-            /* Linux expects 0..127 for normal termination and 128..255 for signal termination */
-            if (WIFEXITED(wstatus))
-                ms->ms_exitcode = WEXITSTATUS(wstatus);
-            else if (WIFSIGNALED(wstatus))
-                ms->ms_exitcode = 128 + WTERMSIG(wstatus);
-            else
-                ms->ms_exitcode = ECHILD;
-        }
-    }
-
     if (ms->ms_exitcode != (int)((uint8_t)ms->ms_exitcode)) {
-        SGX_DBG(DBG_E, "Saturation error in exit code %d, getting rounded down to %u\n",
-                ms->ms_exitcode, (uint8_t)ms->ms_exitcode);
+        urts_log_debug("Saturation error in exit code %d, getting rounded down to %u\n",
+                       ms->ms_exitcode, (uint8_t)ms->ms_exitcode);
         ms->ms_exitcode = 255;
     }
 
@@ -72,6 +49,7 @@ static long sgx_ocall_exit(void* pms) {
         sgx_profile_finish();
 #endif
         INLINE_SYSCALL(exit_group, 1, (int)ms->ms_exitcode);
+        die_or_inf_loop();
     }
 
     /* otherwise call SGX-related thread reset and exit this thread */
@@ -87,6 +65,7 @@ static long sgx_ocall_exit(void* pms) {
         sgx_profile_finish();
 #endif
         INLINE_SYSCALL(exit_group, 1, (int)ms->ms_exitcode);
+        die_or_inf_loop();
     }
 
     thread_exit((int)ms->ms_exitcode);
@@ -190,7 +169,7 @@ static long sgx_ocall_fionread(void* pms) {
     int val;
     ODEBUG(OCALL_FIONREAD, ms);
     ret = INLINE_SYSCALL(ioctl, 3, ms->ms_fd, FIONREAD, &val);
-    return IS_ERR(ret) ? ret : val;
+    return ret < 0 ? ret : val;
 }
 
 static long sgx_ocall_fsetnonblock(void* pms) {
@@ -200,7 +179,7 @@ static long sgx_ocall_fsetnonblock(void* pms) {
     ODEBUG(OCALL_FSETNONBLOCK, ms);
 
     ret = INLINE_SYSCALL(fcntl, 2, ms->ms_fd, F_GETFL);
-    if (IS_ERR(ret))
+    if (ret < 0)
         return ret;
 
     flags = ret;
@@ -295,33 +274,17 @@ static long sgx_ocall_clone_thread(void* pms) {
 
 static long sgx_ocall_create_process(void* pms) {
     long ret;
-    char* manifest = NULL;
-    char* manifest_path = NULL;
 
     ms_ocall_create_process_t* ms = (ms_ocall_create_process_t*)pms;
     ODEBUG(OCALL_CREATE_PROCESS, ms);
 
-    /* Temporary solution, will be removed after introduction of centralized manifests. */
-    manifest_path = alloc_concat(ms->ms_uri + URI_PREFIX_FILE_LEN, -1, ".manifest.sgx", -1);
-    if (!manifest_path) {
-        ret = -ENOMEM;
-        goto out;
-    }
-    ret = read_text_file_to_cstr(manifest_path, &manifest);
+    ret = sgx_create_process(ms->ms_uri, ms->ms_nargs, ms->ms_args, &ms->ms_stream_fd,
+                             g_pal_enclave.raw_manifest_data);
     if (ret < 0) {
-        goto out;
-    }
-
-    ret = sgx_create_process(ms->ms_uri, ms->ms_nargs, ms->ms_args, &ms->ms_stream_fd, manifest);
-    if (ret < 0) {
-        goto out;
+        return ret;
     }
     ms->ms_pid = ret;
-    ret = 0;
-out:
-    free(manifest_path);
-    free(manifest);
-    return ret;
+    return 0;
 }
 
 static long sgx_ocall_futex(void* pms) {
@@ -348,8 +311,8 @@ static long sgx_ocall_socketpair(void* pms) {
 }
 
 static long sock_getopt(int fd, struct sockopt* opt) {
-    SGX_DBG(DBG_M, "sock_getopt (fd = %d, sockopt addr = %p) is not implemented \
-            always returns 0\n", fd, opt);
+    urts_log_debug("sock_getopt (fd = %d, sockopt addr = %p) is not implemented "
+                   "and always returns 0\n", fd, opt);
     /* initialize *opt with constant */
     *opt = (struct sockopt){0};
     opt->reuseaddr = 1;
@@ -368,7 +331,7 @@ static long sgx_ocall_listen(void* pms) {
     }
 
     ret = INLINE_SYSCALL(socket, 3, ms->ms_domain, ms->ms_type | SOCK_CLOEXEC, ms->ms_protocol);
-    if (IS_ERR(ret))
+    if (ret < 0)
         goto err;
 
     fd = ret;
@@ -377,37 +340,37 @@ static long sgx_ocall_listen(void* pms) {
     int reuseaddr = 1;
     ret = INLINE_SYSCALL(setsockopt, 5, fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr,
                          sizeof(reuseaddr));
-    if (IS_ERR(ret))
+    if (ret < 0)
         goto err_fd;
 
     if (ms->ms_domain == AF_INET6) {
         /* IPV6_V6ONLY socket option can only be set before first bind */
         ret = INLINE_SYSCALL(setsockopt, 5, fd, IPPROTO_IPV6, IPV6_V6ONLY, &ms->ms_ipv6_v6only,
                              sizeof(ms->ms_ipv6_v6only));
-        if (IS_ERR(ret))
+        if (ret < 0)
             goto err_fd;
     }
 
     ret = INLINE_SYSCALL(bind, 3, fd, ms->ms_addr, (int)ms->ms_addrlen);
-    if (IS_ERR(ret))
+    if (ret < 0)
         goto err_fd;
 
     if (ms->ms_addr) {
         int addrlen = ms->ms_addrlen;
         ret = INLINE_SYSCALL(getsockname, 3, fd, ms->ms_addr, &addrlen);
-        if (IS_ERR(ret))
+        if (ret < 0)
             goto err_fd;
         ms->ms_addrlen = addrlen;
     }
 
     if (ms->ms_type & SOCK_STREAM) {
         ret = INLINE_SYSCALL(listen, 2, fd, DEFAULT_BACKLOG);
-        if (IS_ERR(ret))
+        if (ret < 0)
             goto err_fd;
     }
 
     ret = sock_getopt(fd, &ms->ms_sockopt);
-    if (IS_ERR(ret))
+    if (ret < 0)
         goto err_fd;
 
     return fd;
@@ -431,12 +394,12 @@ static long sgx_ocall_accept(void* pms) {
     int addrlen = ms->ms_addrlen;
 
     ret = INLINE_SYSCALL(accept4, 4, ms->ms_sockfd, ms->ms_addr, &addrlen, O_CLOEXEC);
-    if (IS_ERR(ret))
+    if (ret < 0)
         goto err;
 
     fd = ret;
     ret = sock_getopt(fd, &ms->ms_sockopt);
-    if (IS_ERR(ret))
+    if (ret < 0)
         goto err_fd;
 
     ms->ms_addrlen = addrlen;
@@ -460,7 +423,7 @@ static long sgx_ocall_connect(void* pms) {
     }
 
     ret = INLINE_SYSCALL(socket, 3, ms->ms_domain, ms->ms_type | SOCK_CLOEXEC, ms->ms_protocol);
-    if (IS_ERR(ret))
+    if (ret < 0)
         goto err;
 
     fd = ret;
@@ -470,19 +433,19 @@ static long sgx_ocall_connect(void* pms) {
             /* IPV6_V6ONLY socket option can only be set before first bind */
             ret = INLINE_SYSCALL(setsockopt, 5, fd, IPPROTO_IPV6, IPV6_V6ONLY, &ms->ms_ipv6_v6only,
                                  sizeof(ms->ms_ipv6_v6only));
-            if (IS_ERR(ret))
+            if (ret < 0)
                 goto err_fd;
         }
 
         ret = INLINE_SYSCALL(bind, 3, fd, ms->ms_bind_addr, ms->ms_bind_addrlen);
-        if (IS_ERR(ret))
+        if (ret < 0)
             goto err_fd;
     }
 
     if (ms->ms_addr) {
         ret = INLINE_SYSCALL(connect, 3, fd, ms->ms_addr, ms->ms_addrlen);
 
-        if (IS_ERR(ret) && ERRNO(ret) == EINPROGRESS) {
+        if (ret == -EINPROGRESS) {
             do {
                 struct pollfd pfd = {
                     .fd      = fd,
@@ -490,23 +453,23 @@ static long sgx_ocall_connect(void* pms) {
                     .revents = 0,
                 };
                 ret = INLINE_SYSCALL(ppoll, 4, &pfd, 1, NULL, NULL);
-            } while (IS_ERR(ret) && ERRNO(ret) == -EWOULDBLOCK);
+            } while (ret == -EWOULDBLOCK);
         }
 
-        if (IS_ERR(ret))
+        if (ret < 0)
             goto err_fd;
     }
 
     if (ms->ms_bind_addr && !ms->ms_bind_addr->sa_family) {
         int addrlen = ms->ms_bind_addrlen;
         ret = INLINE_SYSCALL(getsockname, 3, fd, ms->ms_bind_addr, &addrlen);
-        if (IS_ERR(ret))
+        if (ret < 0)
             goto err_fd;
         ms->ms_bind_addrlen = addrlen;
     }
 
     ret = sock_getopt(fd, &ms->ms_sockopt);
-    if (IS_ERR(ret))
+    if (ret < 0)
         goto err_fd;
 
     return fd;
@@ -543,12 +506,12 @@ static long sgx_ocall_recv(void* pms) {
 
     ret = INLINE_SYSCALL(recvmsg, 3, ms->ms_sockfd, &hdr, 0);
 
-    if (!IS_ERR(ret) && hdr.msg_name) {
+    if (ret >= 0 && hdr.msg_name) {
         /* note that ms->ms_addr is filled by recvmsg() itself */
         ms->ms_addrlen = hdr.msg_namelen;
     }
 
-    if (!IS_ERR(ret) && hdr.msg_control) {
+    if (ret >= 0 && hdr.msg_control) {
         /* note that ms->ms_control is filled by recvmsg() itself */
         ms->ms_controllen = hdr.msg_controllen;
     }
@@ -633,7 +596,7 @@ static long sgx_ocall_sleep(void* pms) {
     }
 
     ret = INLINE_SYSCALL(nanosleep, 2, &req, &rem);
-    if (IS_ERR(ret) && ERRNO(ret) == EINTR)
+    if (ret == -EINTR)
         ms->ms_microsec = rem.tv_sec * 1000000UL + rem.tv_nsec / 1000UL;
     return ret;
 }
@@ -667,7 +630,7 @@ static long sgx_ocall_delete(void* pms) {
 
     ret = INLINE_SYSCALL(unlink, 1, ms->ms_pathname);
 
-    if (IS_ERR(ret) && ERRNO(ret) == EISDIR)
+    if (ret == -EISDIR)
         ret = INLINE_SYSCALL(rmdir, 1, ms->ms_pathname);
 
     return ret;
@@ -683,25 +646,28 @@ static long sgx_ocall_eventfd(void* pms) {
     return ret;
 }
 
-static long sgx_ocall_update_debugger(void* pms) {
-    ms_ocall_update_debugger_t* ms = (ms_ocall_update_debugger_t*)pms;
-    ODEBUG(OCALL_UPDATE_DEBUGGER, ms);
+static long sgx_ocall_debug_map_add(void* pms) {
+    ms_ocall_debug_map_add_t* ms = (ms_ocall_debug_map_add_t*)pms;
 
 #ifdef DEBUG
-    g_pal_enclave.debug_map = ms->ms_debug_map;
-    update_debugger();
+    int ret = debug_map_add(ms->ms_name, ms->ms_addr);
+    if (ret < 0)
+        urts_log_error("debug_map_add(%s, %p): %d\n", ms->ms_name, ms->ms_addr, ret);
+
+    sgx_profile_report_elf(ms->ms_name, ms->ms_addr);
 #else
     __UNUSED(ms);
 #endif
     return 0;
 }
 
-static long sgx_ocall_report_mmap(void* pms) {
-    ms_ocall_report_mmap_t* ms = (ms_ocall_report_mmap_t*)pms;
-    ODEBUG(OCALL_REPORT_MMAP, ms);
+static long sgx_ocall_debug_map_remove(void* pms) {
+    ms_ocall_debug_map_remove_t* ms = (ms_ocall_debug_map_remove_t*)pms;
 
 #ifdef DEBUG
-    sgx_profile_report_mmap(ms->ms_filename, ms->ms_addr, ms->ms_len, ms->ms_offset);
+    int ret = debug_map_remove(ms->ms_addr);
+    if (ret < 0)
+        urts_log_error("debug_map_remove(%p): %d\n", ms->ms_addr, ret);
 #else
     __UNUSED(ms);
 #endif
@@ -753,8 +719,8 @@ sgx_ocall_fn_t ocall_table[OCALL_NR] = {
     [OCALL_POLL]             = sgx_ocall_poll,
     [OCALL_RENAME]           = sgx_ocall_rename,
     [OCALL_DELETE]           = sgx_ocall_delete,
-    [OCALL_UPDATE_DEBUGGER]  = sgx_ocall_update_debugger,
-    [OCALL_REPORT_MMAP]      = sgx_ocall_report_mmap,
+    [OCALL_DEBUG_MAP_ADD]    = sgx_ocall_debug_map_add,
+    [OCALL_DEBUG_MAP_REMOVE] = sgx_ocall_debug_map_remove,
     [OCALL_EVENTFD]          = sgx_ocall_eventfd,
     [OCALL_GET_QUOTE]        = sgx_ocall_get_quote,
 };
@@ -820,7 +786,7 @@ static int rpc_thread_loop(void* arg) {
             int ret = INLINE_SYSCALL(futex, 6, &req->lock.lock, FUTEX_WAKE_PRIVATE,
                                      1, NULL, NULL, 0);
             if (ret == -1)
-                SGX_DBG(DBG_E, "RPC thread failed to wake up enclave thread\n");
+                urts_log_error("RPC thread failed to wake up enclave thread\n");
         }
     }
 
@@ -854,7 +820,7 @@ static int start_rpc(size_t num_of_threads) {
                         CLONE_THREAD | CLONE_SIGHAND | CLONE_PTRACE | CLONE_PARENT_SETTID,
                         NULL, &dummy_parent_tid_field, NULL);
 
-        if (IS_ERR(ret)) {
+        if (ret < 0) {
             INLINE_SYSCALL(munmap, 2, stack, RPC_STACK_SIZE);
             return -ENOMEM;
         }
@@ -910,8 +876,6 @@ int ecall_thread_reset(void) {
 }
 
 noreturn void __abort(void) {
-    INLINE_SYSCALL(exit_group, 1, -1);
-    while (true) {
-        /* nothing */;
-    }
+    INLINE_SYSCALL(exit_group, 1, 1);
+    die_or_inf_loop();
 }

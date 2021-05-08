@@ -16,6 +16,12 @@
 
 #define INIT_RANGE_MAP_SIZE 32
 
+struct shim_ipc_info {
+    IDTYPE vmid;
+    struct shim_ipc_port* port;
+    REFTYPE ref_count;
+};
+
 struct idx_bitmap {
     unsigned char map[RANGE_SIZE / BITS];
 };
@@ -51,7 +57,6 @@ struct ipc_range {
     IDTYPE base;
     IDTYPE size;
     IDTYPE owner;
-    struct shim_qstr uri;
     struct shim_ipc_port* port;
 };
 
@@ -72,17 +77,6 @@ static int nowned = 0;
 static int noffered = 0;
 static int nsubed = 0;
 
-DEFINE_LIST(ns_query);
-struct ns_query {
-    IDTYPE dest;
-    unsigned long seq;
-    struct shim_ipc_port* port;
-    LIST_TYPE(ns_query) list;
-};
-
-DEFINE_LISTP(ns_query);
-static LISTP_TYPE(ns_query) ns_queries;
-
 #define KEY_HASH_LEN  8
 #define KEY_HASH_NUM  (1 << KEY_HASH_LEN)
 #define KEY_HASH_MASK (KEY_HASH_NUM - 1)
@@ -95,6 +89,33 @@ struct key {
 };
 DEFINE_LISTP(key);
 static LISTP_TYPE(key) key_map[KEY_HASH_NUM];
+
+static struct shim_ipc_info* create_ipc_info(IDTYPE vmid) {
+    struct shim_ipc_info* info = malloc(sizeof(*info));
+    if (!info) {
+        return NULL;
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->vmid = vmid;
+    REF_SET(info->ref_count, 1);
+    return info;
+}
+
+static void get_ipc_info(struct shim_ipc_info* info) {
+    REF_INC(info->ref_count);
+}
+
+static void put_ipc_info(struct shim_ipc_info* info) {
+    int ref_count = REF_DEC(info->ref_count);
+
+    if (!ref_count) {
+        if (info->port) {
+            put_ipc_port(info->port);
+        }
+        free(info);
+    }
+}
 
 static int __extend_range_bitmap(IDTYPE expected) {
     assert(locked(&range_map_lock));
@@ -175,7 +196,7 @@ static struct range* __get_range(IDTYPE off) {
     return NULL;
 }
 
-static int __add_range(struct range* r, IDTYPE off, IDTYPE owner, const char* uri) {
+static int __add_range(struct range* r, IDTYPE off, IDTYPE owner) {
     assert(locked(&range_map_lock));
 
     LISTP_TYPE(range)* head = range_table + RANGE_HASH(off);
@@ -193,7 +214,7 @@ static int __add_range(struct range* r, IDTYPE off, IDTYPE owner, const char* ur
     r->subranges = NULL;
 
     if (owner) {
-        r->owner = create_ipc_info_in_list(owner, uri, strlen(uri));
+        r->owner = create_ipc_info(owner);
         if (!r->owner)
             return -ENOMEM;
     }
@@ -218,7 +239,7 @@ static int __add_range(struct range* r, IDTYPE off, IDTYPE owner, const char* ur
                 }
 
                 if (tmp->owner)
-                    put_ipc_info_in_list(tmp->owner);
+                    put_ipc_info(tmp->owner);
 
                 r->used      = tmp->used;
                 r->subranges = tmp->subranges;
@@ -252,7 +273,7 @@ static int __add_range(struct range* r, IDTYPE off, IDTYPE owner, const char* ur
     return 0;
 }
 
-static int add_ipc_range(IDTYPE base, IDTYPE owner, const char* uri) {
+static int add_ipc_range(IDTYPE base, IDTYPE owner) {
     IDTYPE off = (base - 1) / RANGE_SIZE;
     int ret;
 
@@ -262,7 +283,7 @@ static int add_ipc_range(IDTYPE base, IDTYPE owner, const char* uri) {
 
     lock(&range_map_lock);
     r->owner = NULL;
-    ret = __add_range(r, off, owner, uri);
+    ret = __add_range(r, off, owner);
     if (ret < 0)
         free(r);
     unlock(&range_map_lock);
@@ -272,12 +293,12 @@ static int add_ipc_range(IDTYPE base, IDTYPE owner, const char* uri) {
 static void __del_ipc_subrange(struct subrange** ptr) {
     struct subrange* s = *ptr;
     *ptr = NULL;
-    put_ipc_info_in_list(s->owner);
+    put_ipc_info(s->owner);
     free(s);
     nsubed--;
 }
 
-int add_ipc_subrange(IDTYPE idx, IDTYPE owner, const char* uri) {
+int add_ipc_subrange(IDTYPE idx, IDTYPE owner) {
     IDTYPE off = (idx - 1) / RANGE_SIZE;
     IDTYPE base = off * RANGE_SIZE + 1;
     int err = 0;
@@ -288,7 +309,7 @@ int add_ipc_subrange(IDTYPE idx, IDTYPE owner, const char* uri) {
     assert(owner);
     lock(&range_map_lock);
 
-    s->owner = create_ipc_info_in_list(owner, uri, strlen(uri));
+    s->owner = create_ipc_info(owner);
     if (!s->owner) {
         err = -ENOMEM;
         goto failed;
@@ -302,7 +323,7 @@ int add_ipc_subrange(IDTYPE idx, IDTYPE owner, const char* uri) {
             goto failed;
         }
 
-        if ((err = __add_range(r, off, 0, NULL)) < 0) {
+        if ((err = __add_range(r, off, 0)) < 0) {
             free(r);
             goto failed;
         }
@@ -336,7 +357,7 @@ failed:
     return err;
 }
 
-static int alloc_ipc_range(IDTYPE owner, const char* uri, IDTYPE* base) {
+static int alloc_ipc_range(IDTYPE owner, IDTYPE* base) {
     struct range* r = malloc(sizeof(struct range));
     if (!r)
         return -ENOMEM;
@@ -359,7 +380,7 @@ static int alloc_ipc_range(IDTYPE owner, const char* uri, IDTYPE* base) {
             }
         }
 
-    ret = __add_range(r, i * BITS + j, owner, uri);
+    ret = __add_range(r, i * BITS + j, owner);
     if (ret < 0) {
         if (r->owner)
             put_ipc_info(r->owner);
@@ -408,122 +429,11 @@ static int get_ipc_range(IDTYPE idx, struct ipc_range* range, struct shim_ipc_in
     range->base  = base;
     range->size  = sz;
     range->owner = p->vmid;
-    qstrcopy(&range->uri, &p->uri);
     range->port = p->port;
 
     if (info) {
         get_ipc_info(p);
         *info = p;
-    }
-
-    unlock(&range_map_lock);
-    return 0;
-}
-
-#if 0 /* unused */
-static int del_ipc_range(IDTYPE idx) {
-    IDTYPE off = (idx - 1) / RANGE_SIZE;
-    int ret = -ESRCH;
-
-    lock(&range_map_lock);
-
-    struct range* r = __get_range(off);
-    if (!r)
-        goto failed;
-
-    if (r->subranges) {
-        for (IDTYPE i = 0; i < RANGE_SIZE; i++)
-            if (r->subranges->map[i]) {
-                ret = -EBUSY;
-                goto failed;
-            }
-    }
-    ret = __set_range_bitmap(off, true);
-    if (ret < 0)
-        goto failed;
-
-    if (r->owner->vmid == g_process_ipc_info.vmid)
-        nowned--;
-    else
-        noffered--;
-
-    if (r->subranges)
-        free(r->subranges);
-    if (r->used)
-        free(r->used);
-    // Re-acquire the head; kind of ugly
-    LISTP_TYPE(range)* head = range_table + RANGE_HASH(off);
-    LISTP_DEL(r, head, hlist);
-
-    /* Chia-Che Tsai 10/17/17: only when r->owner is non-NULL,
-     * and r->owner->vmid == g_process_ipc_info.vmid, r is on the
-     * owned list, otherwise it is an offered. */
-    if (r->owner && r->owner->vmid == g_process_ipc_info.vmid)
-        LISTP_DEL(r, &owned_ranges, list);
-    else
-        LISTP_DEL(r, &offered_ranges, list);
-
-    put_ipc_info(r->owner);
-    free(r);
-
-    ret = 0;
-failed:
-    unlock(&range_map_lock);
-    return ret;
-}
-
-int del_ipc_subrange(IDTYPE idx) {
-    IDTYPE off = (idx - 1) / RANGE_SIZE;
-    IDTYPE base = off * RANGE_SIZE + 1;
-    int ret = -ESRCH;
-
-    lock(&range_map_lock);
-
-    struct range* r = __get_range(off);
-    if (!r)
-        goto failed;
-
-    if (!r->subranges || !r->subranges->map[idx - base])
-        goto failed;
-
-    __del_ipc_subrange(&r->subranges->map[idx - base]);
-    ret = 0;
-failed:
-    unlock(&range_map_lock);
-    return ret;
-}
-#endif
-
-static int renew_ipc_range(IDTYPE idx) {
-    IDTYPE off = (idx - 1) / RANGE_SIZE;
-
-    lock(&range_map_lock);
-
-    struct range* r = __get_range(off);
-    if (!r) {
-        unlock(&range_map_lock);
-        return -ESRCH;
-    }
-
-    unlock(&range_map_lock);
-    return 0;
-}
-
-static int renew_ipc_subrange(IDTYPE idx) {
-    IDTYPE off = (idx - 1) / RANGE_SIZE;
-    IDTYPE base = off * RANGE_SIZE + 1;
-
-    lock(&range_map_lock);
-
-    struct range* r = __get_range(off);
-    if (!r) {
-        unlock(&range_map_lock);
-        return -ESRCH;
-    }
-
-    if (!r->subranges || !r->subranges->map[idx - base]) {
-        unlock(&range_map_lock);
-        return -ESRCH;
     }
 
     unlock(&range_map_lock);
@@ -613,173 +523,6 @@ int init_ns_ranges(void) {
     return 0;
 }
 
-static void ipc_leader_exit(struct shim_ipc_port* port, IDTYPE vmid) {
-    lock(&g_process_ipc_info.lock);
-
-    if (!g_process_ipc_info.ns || g_process_ipc_info.ns->port != port) {
-        unlock(&g_process_ipc_info.lock);
-        return;
-    }
-
-    struct shim_ipc_info* info = g_process_ipc_info.ns;
-    g_process_ipc_info.ns = NULL;
-    unlock(&g_process_ipc_info.lock);
-
-    debug("ipc port %p of process %u closed suggests leader exits\n", port, vmid);
-
-    put_ipc_info(info);
-}
-
-/*
- * __discover_ns(): Discover the leader of this namespace.
- * @block: Whether to block for discovery.
- * @need_locate: Need the location information of the leader.
- */
-static void __discover_ns(bool block, bool need_locate) {
-    bool ipc_pending = false;
-    lock(&g_process_ipc_info.lock);
-
-    if (g_process_ipc_info.ns) {
-        if (g_process_ipc_info.ns->vmid == g_process_ipc_info.vmid) {
-            if (need_locate && qstrempty(&g_process_ipc_info.ns->uri)) {
-                struct shim_ipc_info* info =
-                    create_ipc_info_and_port(/*use_vmid_as_port_name=*/false);
-                if (info) {
-                    put_ipc_info(g_process_ipc_info.ns);
-                    g_process_ipc_info.ns = info;
-                    add_ipc_port(info->port, 0, IPC_PORT_CONNECTION, &ipc_leader_exit);
-                }
-            }
-            goto out;
-        }
-
-        if (!qstrempty(&g_process_ipc_info.ns->uri))
-            goto out;
-    }
-
-    /*
-     * Now we need to discover the leader through IPC. Because IPC calls can be blocking,
-     * we need to temporarily release g_process_ipc_info.lock to prevent deadlocks. If the discovery
-     * succeeds, g_process_ipc_info.ns will contain the IPC information of the namespace leader.
-     */
-
-    unlock(&g_process_ipc_info.lock);
-
-    // Send out an IPC message to find out the namespace information.
-    // If the call is non-blocking, can't expect the answer when the function finishes.
-    int ret = ipc_findns_send(block);
-    if (!ret) {
-        ipc_pending = !block;  // There is still some unfinished business with IPC
-        lock(&g_process_ipc_info.lock);
-        assert(g_process_ipc_info.ns);
-        goto out;
-    }
-
-    lock(&g_process_ipc_info.lock);
-
-    // At this point, (1) the leader is not me, (2) I don't know leader's URI,
-    // and (3) I failed to find out the leader via IPC. But I am pressed to
-    // report the leader so promote myself (and remove stale leader info).
-    if (g_process_ipc_info.ns)
-        put_ipc_info(g_process_ipc_info.ns);
-
-    if (!need_locate) {
-        g_process_ipc_info.ns = create_ipc_info(g_process_ipc_info.vmid, NULL, 0);
-        goto out;
-    }
-
-    g_process_ipc_info.ns = create_ipc_info_and_port(/*use_vmid_as_port_name=*/false);
-    if (!g_process_ipc_info.ns)
-        goto out;
-
-    // Finally, set the IPC port as a leadership port
-    add_ipc_port(g_process_ipc_info.ns->port, 0, IPC_PORT_CONNECTION, &ipc_leader_exit);
-
-out:
-    if (g_process_ipc_info.ns && !ipc_pending) {
-        // Assertions for checking the correctness of __discover_ns()
-        assert(g_process_ipc_info.ns->vmid == g_process_ipc_info.vmid   // The current process is
-                                                                        // the leader
-               || g_process_ipc_info.ns->port                   // Or there is a connected port
-               || !qstrempty(&g_process_ipc_info.ns->uri));     // Or there is a known URI
-        if (need_locate)
-            assert(!qstrempty(&g_process_ipc_info.ns->uri));    // A known URI is needed
-    }
-
-    unlock(&g_process_ipc_info.lock);
-}
-
-int connect_ns(IDTYPE* vmid, struct shim_ipc_port** portptr) {
-    __discover_ns(true, false);  // This function cannot be called with g_process_ipc_info.lock held
-    lock(&g_process_ipc_info.lock);
-
-    if (!g_process_ipc_info.ns) {
-        unlock(&g_process_ipc_info.lock);
-        return -ESRCH;
-    }
-
-    if (g_process_ipc_info.ns->vmid == g_process_ipc_info.vmid) {
-        if (vmid)
-            *vmid = g_process_ipc_info.ns->vmid;
-        unlock(&g_process_ipc_info.lock);
-        return 0;
-    }
-
-    if (!g_process_ipc_info.ns->port) {
-        if (qstrempty(&g_process_ipc_info.ns->uri)) {
-            unlock(&g_process_ipc_info.lock);
-            return -ESRCH;
-        }
-
-        PAL_HANDLE pal_handle = DkStreamOpen(qstrgetstr(&g_process_ipc_info.ns->uri), 0, 0, 0, 0);
-
-        if (!pal_handle) {
-            unlock(&g_process_ipc_info.lock);
-            return -PAL_ERRNO();
-        }
-
-        add_ipc_port_by_id(g_process_ipc_info.ns->vmid, pal_handle, IPC_PORT_CONNECTION,
-                           &ipc_leader_exit, &g_process_ipc_info.ns->port);
-    }
-
-    if (vmid)
-        *vmid = g_process_ipc_info.ns->vmid;
-    if (portptr) {
-        if (g_process_ipc_info.ns->port)
-            get_ipc_port(g_process_ipc_info.ns->port);
-        *portptr = g_process_ipc_info.ns->port;
-    }
-
-    unlock(&g_process_ipc_info.lock);
-    return 0;
-}
-
-#if 0 /* unused */
-static int disconnect_ns(struct shim_ipc_port * port)
-{
-    lock(&g_process_ipc_info.lock);
-    if (g_process_ipc_info.ns && g_process_ipc_info.ns->port == port) {
-        g_process_ipc_info.ns->port = NULL;
-        put_ipc_port(port);
-    }
-    unlock(&g_process_ipc_info.lock);
-    del_ipc_port(port, IPC_PORT_CONNECTION);
-    return 0;
-}
-#endif
-
-int prepare_ipc_leader(void) {
-    lock(&g_process_ipc_info.lock);
-    bool need_discover = (!g_process_ipc_info.ns || qstrempty(&g_process_ipc_info.ns->uri));
-    unlock(&g_process_ipc_info.lock);
-
-    if (need_discover) {
-        // This function cannot be called with g_process_ipc_info.lock held
-        __discover_ns(true, true);
-    }
-    return 0;
-}
-
 int connect_owner(IDTYPE idx, struct shim_ipc_port** portptr, IDTYPE* owner) {
     struct shim_ipc_info* info = NULL;
     struct ipc_range range;
@@ -806,14 +549,18 @@ int connect_owner(IDTYPE idx, struct shim_ipc_port** portptr, IDTYPE* owner) {
         goto success;
 
     if (!range.port) {
-        PAL_HANDLE pal_handle = DkStreamOpen(qstrgetstr(&range.uri), 0, 0, 0, 0);
-
-        if (!pal_handle) {
-            ret = -PAL_ERRNO() ?: -EACCES;
+        PAL_HANDLE pal_handle = NULL;
+        char uri[PIPE_URI_SIZE];
+        if (vmid_to_uri(range.owner, uri, sizeof(uri)) < 0) {
+            BUG();
+        }
+        ret = DkStreamOpen(uri, 0, 0, 0, 0, &pal_handle);
+        if (ret < 0) {
+            ret = pal_to_unix_errno(ret);
             goto out;
         }
 
-        add_ipc_port_by_id(range.owner, pal_handle, IPC_PORT_CONNECTION, NULL, &range.port);
+        add_ipc_port_by_id(range.owner, pal_handle, NULL, &range.port);
         assert(range.port);
     }
 
@@ -840,175 +587,28 @@ out:
     return ret;
 }
 
-int ipc_findns_send(bool block) {
-    int ret = -ESRCH;
-
-    lock(&g_process_ipc_info.lock);
-    if (!g_process_ipc_info.parent || !g_process_ipc_info.parent->port) {
-        unlock(&g_process_ipc_info.lock);
-        goto out;
-    }
-
-    IDTYPE dest = g_process_ipc_info.parent->vmid;
-    struct shim_ipc_port* port = g_process_ipc_info.parent->port;
-    get_ipc_port(port);
-    unlock(&g_process_ipc_info.lock);
-
-    if (block) {
-        size_t total_msg_size = get_ipc_msg_with_ack_size(0);
-        struct shim_ipc_msg_with_ack* msg = __alloca(total_msg_size);
-        init_ipc_msg_with_ack(msg, IPC_MSG_FINDNS, total_msg_size, dest);
-
-        debug("ipc send to %u: IPC_MSG_FINDNS\n", dest);
-
-        ret = send_ipc_message_with_ack(msg, port, NULL, NULL);
-        goto out_port;
-    }
-
-    size_t total_msg_size = get_ipc_msg_size(0);
-    struct shim_ipc_msg* msg = __alloca(total_msg_size);
-    init_ipc_msg(msg, IPC_MSG_FINDNS, total_msg_size, dest);
-
-    debug("ipc send to %u: IPC_MSG_FINDNS\n", dest);
-
-    ret = send_ipc_message(msg, port);
-out_port:
-    put_ipc_port(port);
-out:
-    return ret;
-}
-
-int ipc_findns_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
-    debug("ipc callback from %u: IPC_MSG_FINDNS\n", msg->src);
-
-    int ret = 0;
-    __discover_ns(false, true);  // This function cannot be called with g_process_ipc_info.lock held
-    lock(&g_process_ipc_info.lock);
-
-    if (g_process_ipc_info.ns && !qstrempty(&g_process_ipc_info.ns->uri)) {
-        // Got the answer! Send back the discovery now.
-        ret = ipc_tellns_send(port, msg->src, g_process_ipc_info.ns, msg->seq);
-    } else {
-        // Don't know the answer yet, set up a callback for sending the discovery later.
-        struct ns_query* query = malloc(sizeof(struct ns_query));
-        if (query) {
-            query->dest = msg->src;
-            query->seq  = msg->seq;
-            get_ipc_port(port);
-            query->port = port;
-            INIT_LIST_HEAD(query, list);
-            LISTP_ADD_TAIL(query, &ns_queries, list);
-        } else {
-            ret = -ENOMEM;
-        }
-    }
-    unlock(&g_process_ipc_info.lock);
-    return ret;
-}
-
-int ipc_tellns_send(struct shim_ipc_port* port, IDTYPE dest, struct shim_ipc_info* leader,
-                    unsigned long seq) {
-    size_t total_msg_size    = get_ipc_msg_size(leader->uri.len + sizeof(struct shim_ipc_tellns));
-    struct shim_ipc_msg* msg = __alloca(total_msg_size);
-    init_ipc_msg(msg, IPC_MSG_TELLNS, total_msg_size, dest);
-
-    struct shim_ipc_tellns* msgin = (void*)&msg->msg;
-    msgin->vmid = leader->vmid;
-    memcpy(msgin->uri, qstrgetstr(&leader->uri), leader->uri.len + 1);
-    msg->seq = seq;
-
-    debug("ipc send to %u: IPC_MSG_TELLNS(%u, %s)\n", dest, leader->vmid, msgin->uri);
-
-    int ret = send_ipc_message(msg, port);
-    return ret;
-}
-
-int ipc_tellns_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
-    struct shim_ipc_tellns* msgin = (void*)&msg->msg;
-    int ret = 0;
-
-    debug("ipc callback from %u: IPC_MSG_TELLNS(%u, %s)\n", msg->src, msgin->vmid, msgin->uri);
-
-    lock(&g_process_ipc_info.lock);
-
-    if (g_process_ipc_info.ns) {
-        g_process_ipc_info.ns->vmid = msgin->vmid;
-        qstrsetstr(&g_process_ipc_info.ns->uri, msgin->uri, strlen(msgin->uri));
-    } else {
-        g_process_ipc_info.ns = create_ipc_info(msgin->vmid, msgin->uri, strlen(msgin->uri));
-        if (!g_process_ipc_info.ns) {
-            ret = -ENOMEM;
-            goto out;
-        }
-    }
-
-    assert(g_process_ipc_info.ns->vmid != 0);
-    assert(!qstrempty(&g_process_ipc_info.ns->uri));
-
-    struct ns_query* query;
-    struct ns_query* pos;
-
-    LISTP_FOR_EACH_ENTRY_SAFE(query, pos, &ns_queries, list) {
-        LISTP_DEL(query, &ns_queries, list);
-        ipc_tellns_send(query->port, query->dest, g_process_ipc_info.ns, query->seq);
-        put_ipc_port(query->port);
-        free(query);
-    }
-
-    struct shim_ipc_msg_with_ack* obj = pop_ipc_msg_with_ack(port, msg->seq);
-    if (obj && obj->thread)
-        thread_wakeup(obj->thread);
-
-out:
-    unlock(&g_process_ipc_info.lock);
-    return ret;
-}
-
 int ipc_lease_send(void) {
-    IDTYPE leader;
-    struct shim_ipc_port* port = NULL;
-    struct shim_ipc_info* self = NULL;
-    int ret = 0;
-
-    if ((ret = connect_ns(&leader, &port)) < 0)
-        goto out;
-
-    if ((ret = get_ipc_info_cur_process(&self)) < 0)
-        goto out;
-
-    if (leader == g_process_ipc_info.vmid) {
-        ret = alloc_ipc_range(g_process_ipc_info.vmid, qstrgetstr(&self->uri), NULL);
-        put_ipc_info(self);
-        goto out;
+    if (!g_process_ipc_info.ns) {
+        return alloc_ipc_range(g_process_ipc_info.vmid, NULL);
     }
 
-    size_t len = self->uri.len;
-    size_t total_msg_size = get_ipc_msg_with_ack_size(len + sizeof(struct shim_ipc_lease));
+    IDTYPE leader = g_process_ipc_info.ns->vmid;
+
+    size_t total_msg_size = get_ipc_msg_with_ack_size(0);
     struct shim_ipc_msg_with_ack* msg = __alloca(total_msg_size);
     init_ipc_msg_with_ack(msg, IPC_MSG_LEASE, total_msg_size, leader);
 
-    struct shim_ipc_lease* msgin = (void*)&msg->msg.msg;
-    assert(!qstrempty(&self->uri));
-    memcpy(msgin->uri, qstrgetstr(&self->uri), len + 1);
-    put_ipc_info(self);
+    log_debug("ipc send to %u: IPC_MSG_LEASE\n", leader);
 
-    debug("ipc send to %u: IPC_MSG_LEASE(%s)\n", leader, msgin->uri);
-
-    ret = send_ipc_message_with_ack(msg, port, NULL, NULL);
-out:
-    if (port)
-        put_ipc_port(port);
-    return ret;
+    return send_ipc_message_with_ack(msg, g_process_ipc_info.ns, NULL, NULL);
 }
 
 int ipc_lease_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
-    struct shim_ipc_lease* msgin = (void*)&msg->msg;
-
-    debug("ipc callback from %u: IPC_MSG_LEASE(%s)\n", msg->src, msgin->uri);
+    log_debug("ipc callback from %u: IPC_MSG_LEASE\n", msg->src);
 
     IDTYPE base = 0;
 
-    int ret = alloc_ipc_range(msg->src, msgin->uri, &base);
+    int ret = alloc_ipc_range(msg->src, &base);
     if (ret < 0)
         goto out;
 
@@ -1030,7 +630,7 @@ int ipc_offer_send(struct shim_ipc_port* port, IDTYPE dest, IDTYPE base, IDTYPE 
     msgin->size  = size;
     msg->seq = seq;
 
-    debug("ipc send to %u: IPC_MSG_OFFER(%u, %u)\n", port->vmid, base, size);
+    log_debug("ipc send to %u: IPC_MSG_OFFER(%u, %u)\n", port->vmid, base, size);
     ret = send_ipc_message(msg, port);
     return ret;
 }
@@ -1038,19 +638,18 @@ int ipc_offer_send(struct shim_ipc_port* port, IDTYPE dest, IDTYPE base, IDTYPE 
 int ipc_offer_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
     struct shim_ipc_offer* msgin = (void*)&msg->msg;
 
-    debug("ipc callback from %u: IPC_MSG_OFFER(%u, %u)\n", msg->src, msgin->base, msgin->size);
+    log_debug("ipc callback from %u: IPC_MSG_OFFER(%u, %u)\n", msg->src, msgin->base, msgin->size);
 
     struct shim_ipc_msg_with_ack* obj = pop_ipc_msg_with_ack(port, msg->seq);
 
     switch (msgin->size) {
         case RANGE_SIZE:
-            add_ipc_range(msgin->base, g_process_ipc_info.vmid,
-                          qstrgetstr(&g_process_ipc_info.self->uri));
+            add_ipc_range(msgin->base, g_process_ipc_info.vmid);
             break;
         case 1:
             if (obj) {
                 struct shim_ipc_sublease* s = (void*)&obj->msg.msg;
-                add_ipc_subrange(s->idx, s->tenant, s->uri);
+                add_ipc_subrange(s->idx, s->tenant);
             }
             break;
         default:
@@ -1064,124 +663,49 @@ out:
     return 0;
 }
 
-/* TODO: unused */
-int ipc_renew_send(IDTYPE base, IDTYPE size) {
-    IDTYPE leader;
-    struct shim_ipc_port* port = NULL;
-    int ret = 0;
-
-    if ((ret = connect_ns(&leader, &port)) < 0)
-        goto out;
-
-    size_t total_msg_size    = get_ipc_msg_size(sizeof(struct shim_ipc_renew));
-    struct shim_ipc_msg* msg = __alloca(total_msg_size);
-    init_ipc_msg(msg, IPC_MSG_RENEW, total_msg_size, leader);
-
-    struct shim_ipc_renew* msgin = (void*)&msg->msg;
-    msgin->base = base;
-    msgin->size = size;
-
-    debug("ipc send to : IPC_MSG_RENEW(%u, %u)\n", base, size);
-    ret = send_ipc_message(msg, port);
-    put_ipc_port(port);
-out:
-    return ret;
-}
-
-/* TODO: unused */
-int ipc_renew_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
-    struct shim_ipc_renew* msgin = (void*)&msg->msg;
-    int ret = 0;
-
-    debug("ipc callback from %u: IPC_MSG_RENEW(%u, %u)\n", msg->src, msgin->base, msgin->size);
-
-    if (msgin->size != 1 && msgin->size != RANGE_SIZE) {
-        ret = -EINVAL;
-        goto out;
+int ipc_sublease_send(IDTYPE tenant, IDTYPE idx) {
+    if (!g_process_ipc_info.ns) {
+        return add_ipc_subrange(idx, tenant);
     }
 
-    switch (msgin->size) {
-        case RANGE_SIZE:
-            ret = renew_ipc_range(msgin->base);
-            break;
-        case 1:
-            ret = renew_ipc_subrange(msgin->size);
-            break;
-        default:
-            ret = -EINVAL;
-            break;
-    }
+    IDTYPE leader = g_process_ipc_info.ns->vmid;
 
-    if (ret < 0)
-        goto out;
-
-    ret = ipc_offer_send(port, msg->src, msgin->base, msgin->size, msg->seq);
-
-out:
-    return ret;
-}
-
-int ipc_sublease_send(IDTYPE tenant, IDTYPE idx, const char* uri) {
-    IDTYPE leader;
-    struct shim_ipc_port* port = NULL;
-    int ret = 0;
-
-    if ((ret = connect_ns(&leader, &port)) < 0)
-        goto out;
-
-    if (leader == g_process_ipc_info.vmid) {
-        ret = add_ipc_subrange(idx, tenant, uri);
-        goto out;
-    }
-
-    size_t len = strlen(uri);
-    size_t total_msg_size = get_ipc_msg_with_ack_size(len + sizeof(struct shim_ipc_sublease));
+    size_t total_msg_size = get_ipc_msg_with_ack_size(sizeof(struct shim_ipc_sublease));
     struct shim_ipc_msg_with_ack* msg = __alloca(total_msg_size);
     init_ipc_msg_with_ack(msg, IPC_MSG_SUBLEASE, total_msg_size, leader);
 
     struct shim_ipc_sublease* msgin = (void*)&msg->msg.msg;
     msgin->tenant = tenant;
     msgin->idx    = idx;
-    memcpy(msgin->uri, uri, len + 1);
 
-    debug("ipc send to %u: IPC_MSG_SUBLEASE(%u, %u, %s)\n", leader, tenant, idx, msgin->uri);
+    log_debug("ipc send to %u: IPC_MSG_SUBLEASE(%u, %u)\n", leader, tenant, idx);
 
-    ret = send_ipc_message_with_ack(msg, port, NULL, NULL);
-out:
-    if (port)
-        put_ipc_port(port);
-    return ret;
+    return send_ipc_message_with_ack(msg, g_process_ipc_info.ns, NULL, NULL);
 }
 
 int ipc_sublease_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
     struct shim_ipc_sublease* msgin = (void*)&msg->msg;
 
-    debug("ipc callback from %u: IPC_MSG_SUBLEASE(%u, %u, %s)\n", msg->src, msgin->idx,
-          msgin->tenant, msgin->uri);
+    log_debug("ipc callback from %u: IPC_MSG_SUBLEASE(%u, %u)\n", msg->src, msgin->idx,
+              msgin->tenant);
 
-    int ret = add_ipc_subrange(msgin->idx, msgin->tenant, msgin->uri);
+    int ret = add_ipc_subrange(msgin->idx, msgin->tenant);
 
     ret = ipc_offer_send(port, msg->src, msgin->idx, 1, msg->seq);
     return ret;
 }
 
 int ipc_query_send(IDTYPE idx) {
-    struct ipc_range range;
-    IDTYPE leader;
-    struct shim_ipc_port* port = NULL;
-    int ret = 0;
-    memset(&range, 0, sizeof(struct ipc_range));
-
-    if (!get_ipc_range(idx, &range, NULL))
-        goto out;
-
-    if ((ret = connect_ns(&leader, &port)) < 0)
-        goto out;
-
-    if (g_process_ipc_info.vmid == leader) {
-        ret = -ESRCH;
-        goto out;
+    struct ipc_range range = { 0 };
+    if (!get_ipc_range(idx, &range, NULL)) {
+        return 0;
     }
+
+    if (!g_process_ipc_info.ns) {
+        return -ESRCH;
+    }
+
+    IDTYPE leader = g_process_ipc_info.ns->vmid;
 
     size_t total_msg_size = get_ipc_msg_with_ack_size(sizeof(struct shim_ipc_query));
     struct shim_ipc_msg_with_ack* msg = __alloca(total_msg_size);
@@ -1190,181 +714,29 @@ int ipc_query_send(IDTYPE idx) {
     struct shim_ipc_query* msgin = (void*)&msg->msg.msg;
     msgin->idx = idx;
 
-    debug("ipc send to %u: IPC_MSG_QUERY(%u)\n", leader, idx);
+    log_debug("ipc send to %u: IPC_MSG_QUERY(%u)\n", leader, idx);
 
-    ret = send_ipc_message_with_ack(msg, port, NULL, NULL);
-out:
-    if (port)
-        put_ipc_port(port);
-    return ret;
+    return send_ipc_message_with_ack(msg, g_process_ipc_info.ns, NULL, NULL);
 }
 
-int ipc_query_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
-    struct shim_ipc_query* msgin = (void*)&msg->msg;
-
-    debug("ipc callback from %u: IPC_MSG_QUERY(%u)\n", msg->src, msgin->idx);
-
-    struct ipc_range range;
-    int ret = 0;
-    memset(&range, 0, sizeof(struct ipc_range));
-
-    ret = get_ipc_range(msgin->idx, &range, NULL);
-    if (ret < 0)
-        goto out;
-
-    assert(msgin->idx >= range.base && msgin->idx < range.base + range.size);
-    assert(range.owner);
-    assert(!qstrempty(&range.uri));
-
-    struct ipc_ns_offered ans;
-    ans.base         = range.base;
-    ans.size         = range.size;
-    ans.owner_offset = 0;
-    size_t ownerdatasz = sizeof(struct ipc_ns_client) + range.uri.len;
-    struct ipc_ns_client* owner = __alloca(ownerdatasz);
-    owner->vmid = range.owner;
-    assert(!qstrempty(&range.uri));
-    memcpy(owner->uri, qstrgetstr(&range.uri), range.uri.len + 1);
-
-    ret = ipc_answer_send(port, msg->src, 1, &ans, 1, &owner, &ownerdatasz, msg->seq);
-out:
-    return ret;
-}
-
-int ipc_queryall_send(void) {
-    IDTYPE leader;
-    struct shim_ipc_port* port = NULL;
-    int ret = 0;
-
-    if ((ret = connect_ns(&leader, &port)) < 0)
-        goto out;
-
-    if (g_process_ipc_info.vmid == leader)
-        goto out;
-
-    size_t total_msg_size = get_ipc_msg_with_ack_size(0);
-    struct shim_ipc_msg_with_ack* msg = __alloca(total_msg_size);
-    init_ipc_msg_with_ack(msg, IPC_MSG_QUERYALL, total_msg_size, leader);
-
-    debug("ipc send to %u: IPC_MSG_QUERYALL\n", leader);
-
-    ret = send_ipc_message_with_ack(msg, port, NULL, NULL);
-    put_ipc_port(port);
-out:
-    return ret;
-}
-
-int ipc_queryall_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
-    debug("ipc callback from %u: IPC_MSG_QUERYALL\n", msg->src);
-
-    LISTP_TYPE(range)* list = &offered_ranges;
-    struct range* r;
-    int ret;
-
-    lock(&range_map_lock);
-
-    size_t maxanswers = nowned + noffered + nsubed;
-    size_t answers_cnt = 0, owners_cnt = 0, i;
-    struct ipc_ns_offered* answers = __alloca(sizeof(struct ipc_ns_offered) * maxanswers);
-    struct ipc_ns_client** ownerdata = __alloca(sizeof(struct ipc_ns_client*) * maxanswers);
-    size_t* ownerdatasz = __alloca(sizeof(size_t) * maxanswers);
-    size_t owner_offset = 0;
-
-retry:
-    LISTP_FOR_EACH_ENTRY(r, list, list) {
-        struct shim_ipc_info* p = r->owner;
-        size_t datasz = sizeof(struct ipc_ns_client) + p->uri.len;
-        struct ipc_ns_client* owner = __alloca(datasz);
-
-        assert(!qstrempty(&p->uri));
-        owner->vmid = p->vmid;
-        memcpy(owner->uri, qstrgetstr(&p->uri), p->uri.len + 1);
-
-        IDTYPE base = r->offset * RANGE_SIZE + 1;
-        answers[answers_cnt].base         = base;
-        answers[answers_cnt].size         = RANGE_SIZE;
-        answers[answers_cnt].owner_offset = owner_offset;
-        answers_cnt++;
-
-        ownerdata[owners_cnt]   = owner;
-        ownerdatasz[owners_cnt] = datasz;
-        owners_cnt++;
-
-        owner_offset += datasz;
-
-        if (!r->subranges)
-            continue;
-
-        for (i = 0; i < RANGE_SIZE; i++) {
-            if (!r->subranges->map[i])
-                continue;
-
-            struct subrange* s = r->subranges->map[i];
-            p = s->owner;
-            datasz = sizeof(struct ipc_ns_client) + p->uri.len;
-            owner = __alloca(datasz);
-
-            assert(!qstrempty(&p->uri));
-            owner->vmid = p->vmid;
-            memcpy(owner->uri, qstrgetstr(&p->uri), p->uri.len + 1);
-
-            answers[answers_cnt].base         = base + i;
-            answers[answers_cnt].size         = 1;
-            answers[answers_cnt].owner_offset = owner_offset;
-            answers_cnt++;
-
-            ownerdata[owners_cnt]   = owner;
-            ownerdatasz[owners_cnt] = datasz;
-            owners_cnt++;
-
-            owner_offset += datasz;
-        }
-    }
-
-    if (list == &offered_ranges) {
-        list = &owned_ranges;
-        goto retry;
-    }
-
-    unlock(&range_map_lock);
-
-    ret = ipc_answer_send(port, msg->src, answers_cnt, answers, owners_cnt, ownerdata, ownerdatasz,
-                          msg->seq);
-
-    return ret;
-}
-
-int ipc_answer_send(struct shim_ipc_port* port, IDTYPE dest, size_t answers_cnt,
-                    struct ipc_ns_offered* answers, size_t owners_cnt,
-                    struct ipc_ns_client** ownerdata, size_t* ownerdatasz, unsigned long seq) {
-    size_t owner_offset = sizeof(struct shim_ipc_answer)
-                          + sizeof(struct ipc_ns_offered) * answers_cnt;
-    size_t total_ownerdatasz = 0;
-    for (size_t i = 0; i < owners_cnt; i++) {
-        total_ownerdatasz += ownerdatasz[i];
-    }
-
-    size_t total_msg_size = get_ipc_msg_size(owner_offset + total_ownerdatasz);
+static int ipc_answer_send(struct shim_ipc_port* port, IDTYPE dest, size_t answers_cnt,
+                           struct ipc_ns_offered* answers, unsigned long seq) {
+    size_t total_msg_size = get_ipc_msg_size(sizeof(struct shim_ipc_answer)
+                                             + answers_cnt * sizeof(answers[0]));
     struct shim_ipc_msg* msg = __alloca(total_msg_size);
     init_ipc_msg(msg, IPC_MSG_ANSWER, total_msg_size, dest);
 
     struct shim_ipc_answer* msgin = (void*)&msg->msg;
     msgin->answers_cnt = answers_cnt;
-    for (size_t i = 0; i < answers_cnt; i++) {
-        msgin->answers[i] = answers[i];
-        msgin->answers[i].owner_offset += owner_offset;
-    }
-    for (size_t i = 0; i < owners_cnt; i++) {
-        memcpy((void*)msgin + owner_offset, ownerdata[i], ownerdatasz[i]);
-        owner_offset += ownerdatasz[i];
-    }
+    memcpy(msgin->answers, answers, answers_cnt * sizeof(answers[0]));
     msg->seq = seq;
 
     if (answers_cnt == 1)
-        debug("ipc send to %u: IPC_MSG_ANSWER([%u, %u])\n", dest, answers[0].base, answers[0].size);
+        log_debug("ipc send to %u: IPC_MSG_ANSWER([%u, %u])\n", dest, answers[0].base,
+                  answers[0].size);
     else if (answers_cnt)
-        debug("ipc send to %u: IPC_MSG_ANSWER([%u, %u], ...)\n", dest, answers[0].base,
-              answers[0].size);
+        log_debug("ipc send to %u: IPC_MSG_ANSWER([%u, %u], ...)\n", dest, answers[0].base,
+                  answers[0].size);
 
     return send_ipc_message(msg, port);
 }
@@ -1373,22 +745,21 @@ int ipc_answer_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
     struct shim_ipc_answer* msgin = (void*)&msg->msg;
 
     if (msgin->answers_cnt == 1)
-        debug("ipc callback from %u: IPC_MSG_ANSWER([%u, %u])\n", msg->src, msgin->answers[0].base,
-              msgin->answers[0].size);
+        log_debug("ipc callback from %u: IPC_MSG_ANSWER([%u, %u])\n", msg->src,
+                  msgin->answers[0].base, msgin->answers[0].size);
     else if (msgin->answers_cnt)
-        debug("ipc callback from %u: IPC_MSG_ANSWER([%u, %u], ...)\n", msg->src,
-              msgin->answers[0].base, msgin->answers[0].size);
+        log_debug("ipc callback from %u: IPC_MSG_ANSWER([%u, %u], ...)\n", msg->src,
+                  msgin->answers[0].base, msgin->answers[0].size);
 
     for (size_t i = 0; i < msgin->answers_cnt; i++) {
-        struct ipc_ns_offered* ans  = &msgin->answers[i];
-        struct ipc_ns_client* owner = (void*)msgin + ans->owner_offset;
+        struct ipc_ns_offered* ans = &msgin->answers[i];
 
         switch (ans->size) {
             case RANGE_SIZE:
-                add_ipc_range(ans->base, owner->vmid, owner->uri);
+                add_ipc_range(ans->base, ans->owner);
                 break;
             case 1:
-                add_ipc_subrange(ans->base, owner->vmid, owner->uri);
+                add_ipc_subrange(ans->base, ans->owner);
                 break;
             default:
                 break;
@@ -1400,6 +771,98 @@ int ipc_answer_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
         thread_wakeup(obj->thread);
 
     return 0;
+}
+
+int ipc_query_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
+    struct shim_ipc_query* msgin = (void*)&msg->msg;
+
+    log_debug("ipc callback from %u: IPC_MSG_QUERY(%u)\n", msg->src, msgin->idx);
+
+    struct ipc_range range;
+    int ret = 0;
+    memset(&range, 0, sizeof(struct ipc_range));
+
+    ret = get_ipc_range(msgin->idx, &range, NULL);
+    if (ret < 0)
+        goto out;
+
+    assert(msgin->idx >= range.base && msgin->idx < range.base + range.size);
+    assert(range.owner);
+
+    struct ipc_ns_offered ans = {
+        .base = range.base,
+        .size = range.size,
+        .owner = range.owner,
+    };
+
+    ret = ipc_answer_send(port, msg->src, 1, &ans, msg->seq);
+out:
+    return ret;
+}
+
+int ipc_queryall_send(void) {
+    if (!g_process_ipc_info.ns) {
+        return 0;
+    }
+
+    IDTYPE leader = g_process_ipc_info.ns->vmid;
+
+    size_t total_msg_size = get_ipc_msg_with_ack_size(0);
+    struct shim_ipc_msg_with_ack* msg = __alloca(total_msg_size);
+    init_ipc_msg_with_ack(msg, IPC_MSG_QUERYALL, total_msg_size, leader);
+
+    log_debug("ipc send to %u: IPC_MSG_QUERYALL\n", leader);
+
+    return send_ipc_message_with_ack(msg, g_process_ipc_info.ns, NULL, NULL);
+}
+
+int ipc_queryall_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) {
+    log_debug("ipc callback from %u: IPC_MSG_QUERYALL\n", msg->src);
+
+    LISTP_TYPE(range)* list = &offered_ranges;
+    struct range* r;
+
+    lock(&range_map_lock);
+
+    size_t maxanswers = nowned + noffered + nsubed;
+    size_t answers_cnt = 0, i;
+    struct ipc_ns_offered* answers = __alloca(sizeof(struct ipc_ns_offered) * maxanswers);
+
+retry:
+    LISTP_FOR_EACH_ENTRY(r, list, list) {
+        struct shim_ipc_info* p = r->owner;
+
+        IDTYPE base = r->offset * RANGE_SIZE + 1;
+        answers[answers_cnt].base = base;
+        answers[answers_cnt].size = RANGE_SIZE;
+        answers[answers_cnt].owner = p->vmid;
+        answers_cnt++;
+
+        if (!r->subranges)
+            continue;
+
+        for (i = 0; i < RANGE_SIZE; i++) {
+            if (!r->subranges->map[i])
+                continue;
+
+            struct subrange* s = r->subranges->map[i];
+            p = s->owner;
+
+            answers[answers_cnt].base = base + i;
+            answers[answers_cnt].size = 1;
+            answers[answers_cnt].owner = p->vmid;
+            answers_cnt++;
+        }
+    }
+
+    if (list == &offered_ranges) {
+        list = &owned_ranges;
+        goto retry;
+    }
+
+    unlock(&range_map_lock);
+
+    return ipc_answer_send(port, msg->src, answers_cnt, answers, msg->seq);
 }
 
 int get_all_pid_status(struct pid_status** status) {
@@ -1461,18 +924,22 @@ retry:
         if (!p->port) {
             IDTYPE owner = p->vmid;
             struct shim_ipc_port* port = NULL;
-            size_t uri_len = p->uri.len;
-            char uri[uri_len + 1];
-
-            memcpy(&uri, qstrgetstr(&p->uri), uri_len);
-            uri[uri_len] = 0;
+            char uri[PIPE_URI_SIZE];
+            if (vmid_to_uri(owner, uri, sizeof(uri)) < 0) {
+                BUG();
+            }
 
             unlock(&range_map_lock);
 
-            PAL_HANDLE pal_handle = DkStreamOpen(uri, 0, 0, 0, 0);
+            PAL_HANDLE pal_handle = NULL;
+            int ret = DkStreamOpen(uri, 0, 0, 0, 0, &pal_handle);
+            if (ret < 0) {
+                // I have no idea how to handle errors here, this function needs a rework.
+                BUG();
+            }
 
             if (pal_handle)
-                add_ipc_port_by_id(owner, pal_handle, IPC_PORT_CONNECTION, NULL, &port);
+                add_ipc_port_by_id(owner, pal_handle, NULL, &port);
 
             lock(&range_map_lock);
             LISTP_FOR_EACH_ENTRY(r, list, list) {
@@ -1591,7 +1058,7 @@ int sysv_add_key(struct sysv_key* key, IDTYPE id) {
     INIT_LIST_HEAD(k, hlist);
     LISTP_ADD(k, head, hlist);
 
-    debug("add key/id pair (%lu, %u) to hash list: %p\n", key->key, id, head);
+    log_debug("added key/id pair (%lu, %u) to hash list: %p\n", key->key, id, head);
     ret = 0;
 out:
     unlock(&range_map_lock);

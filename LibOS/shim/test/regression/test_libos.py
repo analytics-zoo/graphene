@@ -20,6 +20,10 @@ class TC_00_Unittests(RegressionTestCase):
         self.assertIn('Test successful!', stdout)
 
 class TC_01_Bootstrap(RegressionTestCase):
+    def test_001_helloworld(self):
+        stdout, _ = self.run_binary(['helloworld'])
+        self.assertIn('Hello world!', stdout)
+
     def test_100_basic_bootstrapping(self):
         stdout, _ = self.run_binary(['bootstrap'])
 
@@ -89,22 +93,20 @@ class TC_01_Bootstrap(RegressionTestCase):
         'syscalls and redirects to Graphene\'s LibOS. If we will add seccomp to '
         'Linux PAL, then we should allow this test on Linux PAL as well.')
     def test_105_basic_bootstrapping_static(self):
-        # bootstrap_static
         stdout, _ = self.run_binary(['bootstrap_static'])
         self.assertIn('Hello world (bootstrap_static)!', stdout)
 
     def test_106_basic_bootstrapping_pie(self):
-        # bootstrap_pie
         stdout, _ = self.run_binary(['bootstrap_pie'])
         self.assertIn('User program started', stdout)
         self.assertIn('Local Address in Executable: 0x', stdout)
         self.assertIn('argv[0] = bootstrap_pie', stdout)
 
-    def test_110_basic_bootstrapping_cxx(self):
-        stdout, _ = self.run_binary(['bootstrap_c++'])
-
-        # Basic Bootstrapping (C++)
+    @unittest.skipUnless(ON_X86, "x86-specific")
+    def test_110_basic_bootstrapping_cpp(self):
+        stdout, _ = self.run_binary(['bootstrap_cpp'])
         self.assertIn('User Program Started', stdout)
+        self.assertIn('Exception \'test runtime error\' caught', stdout)
 
     def test_200_exec(self):
         stdout, _ = self.run_binary(['exec'])
@@ -142,20 +144,20 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('child exited with status: 0', stdout)
         self.assertIn('test completed successfully', stdout)
 
+    def test_205_double_fork(self):
+        stdout, stderr = self.run_binary(['double_fork'])
+        self.assertIn('TEST OK', stdout)
+        self.assertNotIn('grandchild', stderr)
+
     def test_210_exec_invalid_args(self):
         stdout, _ = self.run_binary(['exec_invalid_args'])
 
         # Execve with invalid pointers in arguments
-        self.assertIn(
-            'execve(invalid-path) correctly returned error', stdout)
-        self.assertIn(
-            'execve(invalid-argv-ptr) correctly returned error', stdout)
-        self.assertIn(
-            'execve(invalid-envp-ptr) correctly returned error', stdout)
-        self.assertIn(
-            'execve(invalid-argv) correctly returned error', stdout)
-        self.assertIn(
-            'execve(invalid-envp) correctly returned error', stdout)
+        self.assertIn('execve(invalid-path) correctly returned error', stdout)
+        self.assertIn('execve(invalid-argv-ptr) correctly returned error', stdout)
+        self.assertIn('execve(invalid-envp-ptr) correctly returned error', stdout)
+        self.assertIn('execve(invalid-argv) correctly returned error', stdout)
+        self.assertIn('execve(invalid-envp) correctly returned error', stdout)
 
     def test_300_shared_object(self):
         stdout, _ = self.run_binary(['shared_object'])
@@ -229,8 +231,8 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('FE_TOWARDZERO parent: 42.5 = 42.0, -42.5 = -42.0', stdout)
 
     def test_700_debug_log_inline(self):
-        stdout, _ = self.run_binary(['debug_log_inline'])
-        self._verify_debug_log(stdout)
+        _, stderr = self.run_binary(['debug_log_inline'])
+        self._verify_debug_log(stderr)
 
     def test_701_debug_log_file(self):
         log_path = 'tmp/debug_log_file.log'
@@ -414,6 +416,8 @@ class TC_30_Syscall(RegressionTestCase):
         self.assertIn('mmap test 3 passed', stdout)
         self.assertIn('mmap test 4 passed', stdout)
 
+        # "test 5" and "test 8" are checked below, in test_051_mmap_sgx
+
     @unittest.skipIf(HAS_SGX,
         'On SGX, SIGBUS isn\'t always implemented correctly, for lack '
         'of memory protection. For now, some of these cases won\'t work.')
@@ -518,6 +522,10 @@ class TC_30_Syscall(RegressionTestCase):
         stdout, _ = self.run_binary(['signal_multithread'])
         self.assertIn('TEST OK', stdout)
 
+    def test_095_kill_all(self):
+        stdout, _ = self.run_binary(['kill_all'])
+        self.assertIn('TEST OK', stdout)
+
     def test_100_get_set_groups(self):
         stdout, _ = self.run_binary(['groups'])
         self.assertIn('child OK', stdout)
@@ -529,6 +537,10 @@ class TC_30_Syscall(RegressionTestCase):
 
     def test_102_pthread_set_get_affinity(self):
         stdout, _ = self.run_binary(['pthread_set_get_affinity', '1000'])
+        self.assertIn('TEST OK', stdout)
+
+    def test_103_gettimeofday(self):
+        stdout, _ = self.run_binary(['gettimeofday'])
         self.assertIn('TEST OK', stdout)
 
 @unittest.skipUnless(HAS_SGX,
@@ -583,6 +595,7 @@ class TC_40_FileSystem(RegressionTestCase):
         self.assertIn('/dev/stdout', stdout)
         self.assertIn('/dev/stderr', stdout)
         self.assertIn('Four bytes from /dev/urandom', stdout)
+        self.assertIn('TEST OK', stdout)
 
     def test_002_device(self):
         stdout, _ = self.run_binary(['device'])
@@ -606,6 +619,10 @@ class TC_40_FileSystem(RegressionTestCase):
         stdout, _ = self.run_binary(['str_close_leak'], timeout=60)
         self.assertIn("Success", stdout)
 
+    def test_050_sysfs(self):
+        stdout, _ = self.run_binary(['sysfs_common'])
+        self.assertIn('TEST OK', stdout)
+
 
 class TC_50_GDB(RegressionTestCase):
     def setUp(self):
@@ -621,7 +638,7 @@ class TC_50_GDB(RegressionTestCase):
         # pylint: disable=fixme
         #
         # To run this test manually, use:
-        # GDB=1 GDB_SCRIPT=debug.gdb ./pal_loader debug
+        # GDB=1 GDB_SCRIPT=debug.gdb graphene-{direct|sgx} debug
         #
         # TODO: strengthen this test after SGX includes enclave entry.
         #
@@ -654,7 +671,7 @@ class TC_50_GDB(RegressionTestCase):
     @unittest.skipUnless(ON_X86, 'x86-specific')
     def test_010_regs_x86_64(self):
         # To run this test manually, use:
-        # GDB=1 GDB_SCRIPT=debug_regs-x86_64.gdb ./pal_loader debug_regs-x86_64
+        # GDB=1 GDB_SCRIPT=debug_regs-x86_64.gdb graphene-{direct|sgx} debug_regs-x86_64
 
         stdout, _ = self.run_gdb(['debug_regs-x86_64'], 'debug_regs-x86_64.gdb')
 
@@ -683,6 +700,10 @@ class TC_80_Socket(RegressionTestCase):
 
         # epoll_wait timeout
         self.assertIn('epoll_wait test passed', stdout)
+
+    def test_011_epoll_epollet(self):
+        stdout, _ = self.run_binary(['epoll_epollet', 'EMULATE_GRAPHENE_BUG'])
+        self.assertIn('TEST OK', stdout)
 
     def test_020_poll(self):
         stdout, _ = self.run_binary(['poll'])
@@ -750,20 +771,21 @@ class TC_80_Socket(RegressionTestCase):
 
     def test_200_socket_udp(self):
         stdout, _ = self.run_binary(['udp'], timeout=50)
-        self.assertIn('Data: This is packet 0', stdout)
-        self.assertIn('Data: This is packet 1', stdout)
-        self.assertIn('Data: This is packet 2', stdout)
-        self.assertIn('Data: This is packet 3', stdout)
-        self.assertIn('Data: This is packet 4', stdout)
-        self.assertIn('Data: This is packet 5', stdout)
-        self.assertIn('Data: This is packet 6', stdout)
-        self.assertIn('Data: This is packet 7', stdout)
-        self.assertIn('Data: This is packet 8', stdout)
-        self.assertIn('Data: This is packet 9', stdout)
+        self.assertIn('This is packet 0', stdout)
+        self.assertIn('This is packet 1', stdout)
+        self.assertIn('This is packet 2', stdout)
+        self.assertIn('This is packet 3', stdout)
+        self.assertIn('This is packet 4', stdout)
+        self.assertIn('This is packet 5', stdout)
+        self.assertIn('This is packet 6', stdout)
+        self.assertIn('This is packet 7', stdout)
+        self.assertIn('This is packet 8', stdout)
+        self.assertIn('This is packet 9', stdout)
 
     def test_300_socket_tcp_msg_peek(self):
         stdout, _ = self.run_binary(['tcp_msg_peek'], timeout=50)
         self.assertIn('[client] receiving with MSG_PEEK: Hello from server!', stdout)
+        self.assertIn('[client] receiving with MSG_PEEK again: Hello from server!', stdout)
         self.assertIn('[client] receiving without MSG_PEEK: Hello from server!', stdout)
         self.assertIn('[client] checking how many bytes are left unread: 0', stdout)
         self.assertIn('[client] done', stdout)

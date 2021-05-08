@@ -31,13 +31,14 @@ or Graphene-SGX, respectively.
 Because these commands will start the lighttpd server in the foreground, you will need to open
 another console to run the client.
 
-Once the server has started, you can test it with `wget`
+Once the server has started, you can test it with `wget` or `curl`
 
     wget http://127.0.0.1:8003/random/10K.1.html
+    curl --compressed http://127.0.0.1:8003/random/10K.1.html -o 10K.1.html
 
 You may also run the benchmark script using `ab` (Apachebench)
 
-    ./benchmark-http.sh 127.0.0.1:8003
+    ../common_tools/benchmark-http.sh 127.0.0.1:8003
 
 Use Ctrl-C to terminate the server once you are finished testing lighttpd.
 

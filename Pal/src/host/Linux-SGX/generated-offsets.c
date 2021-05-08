@@ -21,6 +21,7 @@ __attribute__((__used__)) static void dummy(void) {
     DEFINE(SGX_XFRM_AVX, SGX_XFRM_AVX);
     DEFINE(SGX_XFRM_MPX, SGX_XFRM_MPX);
     DEFINE(SGX_XFRM_AVX512, SGX_XFRM_AVX512);
+    DEFINE(SGX_XFRM_PKRU, SGX_XFRM_PKRU);
     DEFINE(SGX_MISCSELECT_EXINFO, SGX_MISCSELECT_EXINFO);
     DEFINE(SE_KEY_SIZE, SE_KEY_SIZE);
 
@@ -79,7 +80,7 @@ __attribute__((__used__)) static void dummy(void) {
     OFFSET(SGX_COMMON_STACK_PROTECTOR_CANARY, enclave_tls, common.stack_protector_canary);
     OFFSET(SGX_ENCLAVE_SIZE, enclave_tls, enclave_size);
     OFFSET(SGX_TCS_OFFSET, enclave_tls, tcs_offset);
-    OFFSET(SGX_INITIAL_STACK_OFFSET, enclave_tls, initial_stack_offset);
+    OFFSET(SGX_INITIAL_STACK_ADDR, enclave_tls, initial_stack_addr);
     OFFSET(SGX_TMP_RIP, enclave_tls, tmp_rip);
     OFFSET(SGX_ECALL_RETURN_ADDR, enclave_tls, ecall_return_addr);
     OFFSET(SGX_SIG_STACK_LOW, enclave_tls, sig_stack_low);
@@ -98,12 +99,11 @@ __attribute__((__used__)) static void dummy(void) {
     OFFSET(SGX_MANIFEST_SIZE, enclave_tls, manifest_size);
     OFFSET(SGX_HEAP_MIN, enclave_tls, heap_min);
     OFFSET(SGX_HEAP_MAX, enclave_tls, heap_max);
-    OFFSET(SGX_EXEC_ADDR, enclave_tls, exec_addr);
-    OFFSET(SGX_EXEC_SIZE, enclave_tls, exec_size);
     OFFSET(SGX_CLEAR_CHILD_TID, enclave_tls, clear_child_tid);
 
     /* struct pal_tcb_urts aka PAL_TCB_URTS */
     OFFSET(PAL_TCB_URTS_TCS, pal_tcb_urts, tcs);
+    OFFSET(PAL_TCB_URTS_IN_AEX_PROF, pal_tcb_urts, is_in_aex_profiling);
     OFFSET(PAL_TCB_URTS_EENTER_CNT, pal_tcb_urts, eenter_cnt);
     OFFSET(PAL_TCB_URTS_EEXIT_CNT, pal_tcb_urts, eexit_cnt);
     OFFSET(PAL_TCB_URTS_AEX_CNT, pal_tcb_urts, aex_cnt);
@@ -150,7 +150,8 @@ __attribute__((__used__)) static void dummy(void) {
     OFFSET(PAL_SEC_ENCLAVE_ATTRIBUTES, pal_sec, enclave_attributes);
 
     /* pal_linux_def.h */
-    DEFINE(SSAFRAMENUM, SSAFRAMENUM);
+    DEFINE(SSA_FRAME_NUM, SSA_FRAME_NUM);
+    DEFINE(SSA_FRAME_SIZE, SSA_FRAME_SIZE);
     DEFINE(ENCLAVE_STACK_SIZE, ENCLAVE_STACK_SIZE);
     DEFINE(ENCLAVE_SIG_STACK_SIZE, ENCLAVE_SIG_STACK_SIZE);
     DEFINE(DEFAULT_ENCLAVE_BASE, DEFAULT_ENCLAVE_BASE);

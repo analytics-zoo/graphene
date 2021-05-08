@@ -13,17 +13,11 @@
 #include "api.h"
 #include "pal_linux.h"
 #include "pal_security.h"
-#include "sgx_rtld.h"
 #include "sysdep-arch.h"
 #include "toml.h"
 
-#define IS_ERR   INTERNAL_SYSCALL_ERROR
 #define IS_ERR_P INTERNAL_SYSCALL_ERROR_P
-#define ERRNO    INTERNAL_SYSCALL_ERRNO
 #define ERRNO_P  INTERNAL_SYSCALL_ERRNO_P
-
-int printf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-int snprintf(char* str, size_t size, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
 
 /* constants and macros to help rounding addresses to page
    boundaries */
@@ -48,34 +42,33 @@ uint16_t htons(uint16_t shortval);
 uint32_t ntohl(uint32_t longval);
 uint16_t ntohs(uint16_t shortval);
 
-extern struct pal_enclave {
+struct pal_enclave {
     /* attributes */
     bool is_first_process; // Initial process in Graphene namespace is special.
+
+    char* application_path;
+    char* raw_manifest_data;
     unsigned long baseaddr;
     unsigned long size;
     unsigned long thread_num;
     unsigned long rpc_thread_num;
-    unsigned long ssaframesize;
-    bool use_static_address;
+    unsigned long ssa_frame_size;
+    bool nonpie_binary;
     bool remote_attestation_enabled;
     bool use_epid_attestation; /* Valid only if `remote_attestation_enabled` is true, selects
                                 * EPID/DCAP attestation scheme. */
 
     /* files */
-    int exec;
     int sigfile;
     int token;
 
-    /* Path to the PAL binary */
-    char* libpal_uri;
+    char* libpal_uri; /* Path to the PAL binary */
+    char* entrypoint_uri; /* URI of the entry executable for the LibOS */
 
 #ifdef DEBUG
-    /* Pointer to information for GDB inside the enclave (see sgx_rtld.h).
-     * Set up using update_debugger() ocall. */
-    struct debug_map* _Atomic* debug_map;
-
     /* profiling */
     bool profile_enable;
+    int profile_mode;
     char profile_filename[64];
     bool profile_with_stack;
     int profile_frequency;
@@ -83,7 +76,9 @@ extern struct pal_enclave {
 
     /* security information */
     struct pal_sec pal_sec;
-} g_pal_enclave;
+};
+
+extern struct pal_enclave g_pal_enclave;
 
 int open_sgx_driver(bool need_gsgx);
 bool is_wrfsbase_supported(void);
@@ -147,7 +142,8 @@ void thread_exit(int status);
 uint64_t sgx_edbgrd(void* addr);
 void sgx_edbgwr(void* addr, uint64_t data);
 
-int sgx_init_child_process(int parent_pipe_fd, struct pal_sec* pal_sec, char** manifest);
+int sgx_init_child_process(int parent_pipe_fd, struct pal_sec* pal_sec, char** application_path_out,
+                           char** manifest);
 int sgx_signal_setup(void);
 int block_signals(bool block, const int* sigs, int nsig);
 int block_async_signals(bool block);
@@ -164,6 +160,12 @@ void update_debugger(void);
 #define SGX_PROFILE_DEFAULT_FREQUENCY 50
 #define SGX_PROFILE_MAX_FREQUENCY 250
 
+enum {
+    SGX_PROFILE_MODE_AEX = 1,
+    SGX_PROFILE_MODE_OCALL_INNER = 2,
+    SGX_PROFILE_MODE_OCALL_OUTER = 3,
+};
+
 /* Filenames for saved data */
 #define SGX_PROFILE_FILENAME "sgx-perf.data"
 #define SGX_PROFILE_FILENAME_WITH_PID "sgx-perf-%d.data"
@@ -174,11 +176,20 @@ int sgx_profile_init(void);
 /* Finalize and close file */
 void sgx_profile_finish(void);
 
-/* Record a sample */
-void sgx_profile_sample(void* tcs);
+/* Record a sample during AEX */
+void sgx_profile_sample_aex(void* tcs);
 
-/* Record a new mmap of executable region */
-void sgx_profile_report_mmap(const char* filename, uint64_t addr, uint64_t len, uint64_t offset);
+/* Record a sample during OCALL (inner state) */
+void sgx_profile_sample_ocall_inner(void* enclave_gpr);
+
+/* Record a sample during OCALL (function to be executed) */
+void sgx_profile_sample_ocall_outer(void* ocall_func);
+
+/* Record a new mapped ELF */
+void sgx_profile_report_elf(const char* filename, void* addr);
+
+/* Record all ELFs from outer PAL */
+void sgx_profile_report_urts_elfs(void);
 #endif
 
 /* perf.data output (sgx_perf_data.h) */

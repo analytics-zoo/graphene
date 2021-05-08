@@ -35,7 +35,6 @@ $(BUILDDIR)/BUILD_SUCCESS: $(SRCDIR)/configure
 .SECONDARY: $(INSTALLDIR)/INSTALL_SUCCESS
 $(INSTALLDIR)/INSTALL_SUCCESS: $(BUILDDIR)/BUILD_SUCCESS
 	$(MAKE) -C $(BUILDDIR) -f $(SRCDIR)/Makefile top_srcdir=$(SRCDIR) top_builddir=$(BUILDDIR) SKIP_IDCHECK=1 install
-	ln -sf $(call relative-to,$(TESTCASEDIR),../../../Runtime/pal_loader) $(TESTCASEDIR)/pal_loader
 	ln -sf $(abspath Makefile.testcases) $(TESTCASEDIR)/Makefile
 	touch $@
 
@@ -64,7 +63,7 @@ endif
 ltp.xml: CFG = ltp.cfg
 ltp-sgx.xml: CFG = ltp.cfg ltp-sgx.cfg ltp-bug-1075.cfg
 
-%.xml: $(CFG) $(LTPSCENARIO) $(target)
+%.xml: $(CFG) $(target) $(INSTALLDIR)/INSTALL_SUCCESS
 	./contrib/conf_lint.py $(CFG) --scenario $(LTPSCENARIO)
 	./runltp_xml.py $(RUNLTPOPTS) $(foreach cfg,$(CFG),-c $(cfg)) $(LTPSCENARIO) -O $@
 

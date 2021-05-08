@@ -16,14 +16,12 @@
 #include "pal_error.h"
 #include "pal_internal.h"
 
-int _DkProcessCreate(PAL_HANDLE* handle, const char* uri, const char** args) {
+int _DkProcessCreate(PAL_HANDLE* handle, const char* exec_uri, const char** args) {
     return -PAL_ERROR_NOTIMPLEMENTED;
 }
 
 noreturn void _DkProcessExit(int exitcode) {
-    while (true) {
-        /* nothing */;
-    }
+    die_or_inf_loop();
 }
 
 static int64_t proc_read(PAL_HANDLE handle, uint64_t offset, uint64_t count, void* buffer) {

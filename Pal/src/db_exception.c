@@ -22,27 +22,20 @@ PAL_EVENT_HANDLER _DkGetExceptionHandler(PAL_NUM event) {
     return __atomic_load_n(&g_handlers[event], __ATOMIC_ACQUIRE);
 }
 
-PAL_BOL
-DkSetExceptionHandler(PAL_EVENT_HANDLER handler, PAL_NUM event) {
-    ENTER_PAL_CALL(DkSetExceptionHandler);
-
-    if (!handler || event == 0 || event >= ARRAY_SIZE(g_handlers)) {
-        _DkRaiseFailure(PAL_ERROR_INVAL);
-        LEAVE_PAL_CALL_RETURN(PAL_FALSE);
-    }
+void DkSetExceptionHandler(PAL_EVENT_HANDLER handler, PAL_NUM event) {
+    assert(handler && event != 0 && event < ARRAY_SIZE(g_handlers));
 
     __atomic_store_n(&g_handlers[event], handler, __ATOMIC_RELEASE);
-    LEAVE_PAL_CALL_RETURN(PAL_TRUE);
 }
 
-/* This does not return */
 noreturn void __abort(void) {
-    _DkProcessExit(-ENOTRECOVERABLE);
+    _DkProcessExit(ENOTRECOVERABLE);
 }
 
+// TODO: Remove this and always use log_*.
 void warn(const char* format, ...) {
     va_list args;
     va_start(args, format);
-    vprintf(format, args);
+    pal_vprintf(format, args);
     va_end(args);
 }

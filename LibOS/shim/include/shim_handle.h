@@ -15,6 +15,8 @@
 #include <linux/shm.h>
 #include <linux/un.h>
 #include <stdalign.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 #include "atomic.h"  // TODO: migrate to stdatomic.h
 #include "list.h"
@@ -23,20 +25,25 @@
 #include "shim_sysv.h"
 #include "shim_types.h"
 
-/* start definition of shim handle */
+/* Handle types. Many of these are used by a single filesystem. */
 enum shim_handle_type {
-    TYPE_FILE,
-    TYPE_DEV,
-    TYPE_PIPE,
-    TYPE_SOCK,
-    TYPE_DIR,
-    TYPE_SHM,
-    TYPE_SEM,
-    TYPE_MSG,
-    TYPE_FUTEX,
-    TYPE_STR,
-    TYPE_EPOLL,
-    TYPE_EVENTFD
+    /* Files: */
+    TYPE_FILE,       /* host files, used by `chroot` filesystem */
+    TYPE_DEV,        /* emulated devices, used by `dev` filesystem */
+    TYPE_STR,        /* string-based files, handled by `str_*` functions, used by several
+                      * filesystems */
+    TYPE_PSEUDO,     /* pseudo nodes (currently directories), handled by `pseudo_*` functions, used
+                      * by several filesystems */
+
+    /* Pipes and sockets: */
+    TYPE_PIPE,       /* pipes, used by `pipe` filesystem */
+    TYPE_SOCK,       /* sockets, used by `socket` filesystem */
+
+    /* Special handles: */
+    TYPE_SEM,        /* System V semaphores, see `shim_semget.c` */
+    TYPE_MSG,        /* System V messages, see `shim_msgget.c` */
+    TYPE_EPOLL,      /* epoll handles, see `shim_epoll.c` */
+    TYPE_EVENTFD,    /* eventfd handles, used by `eventfd` filesystem */
 };
 
 struct shim_handle;
@@ -95,7 +102,7 @@ struct shim_dev_ops {
     int (*flush)(struct shim_handle* hdl);
 
     /* seek: the content from the file opened as handle */
-    off_t (*seek)(struct shim_handle* hdl, off_t offset, int wence);
+    off_t (*seek)(struct shim_handle* hdl, off_t offset, int whence);
 
     int (*truncate)(struct shim_handle* hdl, uint64_t len);
 
@@ -211,11 +218,6 @@ struct shim_dir_handle {
     struct shim_dentry** ptr;
 };
 
-struct shim_shm_handle {
-    /* XXX: need to implement */
-    void* __reserved;
-};
-
 struct msg_type;
 struct msg_item;
 struct msg_client;
@@ -227,7 +229,6 @@ struct shim_msg_handle {
     unsigned long msqkey; /* msg queue key from user */
     IDTYPE msqid;         /* msg queue identifier */
     bool owned;           /* owned by current process */
-    struct shim_ipc_info* owner;
     int perm;        /* access permissions */
     bool deleted;    /* marking the queue deleted */
     int nmsgs;       /* number of msgs */
@@ -240,7 +241,6 @@ struct shim_msg_handle {
     int ntypes;
     int maxtypes;
     struct msg_type* types;
-    LIST_TYPE(shim_msg_handle) list;
     LIST_TYPE(shim_msg_handle) key_hlist;
     LIST_TYPE(shim_msg_handle) qid_hlist;
 };
@@ -252,7 +252,6 @@ struct shim_sem_handle {
     unsigned long semkey;
     IDTYPE semid;
     bool owned;
-    struct shim_ipc_info* owner;
     int perm;
     bool deleted;
     PAL_HANDLE event;
@@ -315,6 +314,7 @@ struct shim_dentry;
  */
 struct shim_handle {
     enum shim_handle_type type;
+    bool is_dir;
 
     REFTYPE ref_count;
 
@@ -326,22 +326,33 @@ struct shim_handle {
     /* If this handle is registered for any epoll handle, this list contains
      * a shim_epoll_item object in correspondence with the epoll handle. */
     LISTP_TYPE(shim_epoll_item) epolls;
+    /* Only meaningful if the handle is registered in some epoll instance with `EPOLLET` semantics.
+     * `false` if it already triggered an `EPOLLIN` event for the current portion of data otherwise
+     * `true` and the next `epoll_wait` will consider this handle and report events for it. */
+    bool needs_et_poll_in;
+    /* Same as above but for `EPOLLOUT` events. */
+    bool needs_et_poll_out;
 
     struct shim_qstr uri; /* URI representing this handle, it is not
                            * necessary to be set. */
 
     PAL_HANDLE pal_handle;
 
+    /* Type-specific fields: when accessing, ensure that `type` field is appropriate first (at least
+     * by using assert()) */
     union {
-        struct shim_file_handle file;
-        struct shim_dev_handle dev;
-        struct shim_pipe_handle pipe;
-        struct shim_sock_handle sock;
-        struct shim_shm_handle shm;
-        struct shim_msg_handle msg;
-        struct shim_sem_handle sem;
-        struct shim_str_handle str;
-        struct shim_epoll_handle epoll;
+        struct shim_file_handle file;    /* TYPE_FILE */
+        struct shim_dev_handle dev;      /* TYPE_DEV */
+        struct shim_str_handle str;      /* TYPE_STR */
+        /* (no data) */                  /* TYPE_PSEUDO */
+
+        struct shim_pipe_handle pipe;    /* TYPE_PIPE */
+        struct shim_sock_handle sock;    /* TYPE_SOCK */
+
+        struct shim_sem_handle sem;      /* TYPE_SEM */
+        struct shim_msg_handle msg;      /* TYPE_MSG */
+        struct shim_epoll_handle epoll;  /* TYPE_EPOLL */
+        /* (no data) */                  /* TYPE_EVENTFD */
     } info;
 
     struct shim_dir_handle dir_info;
@@ -357,8 +368,8 @@ struct shim_handle* get_new_handle(void);
 void get_handle(struct shim_handle* hdl);
 void put_handle(struct shim_handle* hdl);
 
-/* Set handle to non-blocking mode. */
-int set_handle_nonblocking(struct shim_handle* hdl);
+/* Set handle to non-blocking or blocking mode. */
+int set_handle_nonblocking(struct shim_handle* hdl, bool on);
 
 /* file descriptor table */
 struct shim_fd_handle {
@@ -417,7 +428,7 @@ int walk_handle_map(int (*callback)(struct shim_fd_handle*, struct shim_handle_m
 int init_handle(void);
 int init_important_handles(void);
 
-off_t get_file_size(struct shim_handle* file);
+int get_file_size(struct shim_handle* file, uint64_t* size);
 
 int do_handle_read(struct shim_handle* hdl, void* buf, int count);
 int do_handle_write(struct shim_handle* hdl, const void* buf, int count);

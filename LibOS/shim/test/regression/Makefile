@@ -16,6 +16,8 @@ c_executables = \
 	debug \
 	dev \
 	device \
+	double_fork \
+	epoll_epollet \
 	epoll_wait_timeout \
 	eventfd \
 	exec \
@@ -40,9 +42,12 @@ c_executables = \
 	getdents \
 	getsockname \
 	getsockopt \
+	gettimeofday \
 	groups \
+	helloworld \
 	host_root_fs \
 	init_fail \
+	kill_all \
 	large_mmap \
 	large_dir_read \
 	madvise \
@@ -79,6 +84,7 @@ c_executables = \
 	stat_invalid_args \
 	str_close_leak \
 	syscall \
+	sysfs_common \
 	tcp_ipv6_v6only \
 	tcp_msg_peek \
 	udp \
@@ -86,69 +92,36 @@ c_executables = \
 	vfork_and_exec \
 	$(c_executables-$(ARCH))
 
-cxx_executables = bootstrap_c++
+cxx_executables-x86_64 = bootstrap_cpp
 
-manifests = \
-	manifest \
+repo_manifests = \
 	argv_from_file.manifest \
-	attestation.manifest \
 	debug_log_file.manifest \
 	debug_log_inline.manifest \
 	env_from_file.manifest \
 	env_from_host.manifest \
-	eventfd.manifest \
-	exec_victim.manifest \
-	exit_group.manifest \
 	file_check_policy_allow_all_but_log.manifest \
 	file_check_policy_strict.manifest \
-	futex_bitset.manifest \
-	futex_requeue.manifest \
-	futex_wake_op.manifest \
-	getdents.manifest \
-	host_root_fs.manifest \
-	init_fail.manifest \
-	init_fail2.manifest \
-	large_mmap.manifest \
-	mmap_file.manifest \
-	multi_pthread.manifest \
-	multi_pthread_exitless.manifest \
-	openmp.manifest \
-	proc_path.manifest \
-	shared_object.manifest
+	multi_pthread_exitless.manifest
+
+gen_manifests = $(addsuffix .manifest,$(c_executables) $(cxx_executables-$(ARCH)))
+all_manifests = $(repo_manifests) $(gen_manifests)
 
 exec_target = \
 	$(c_executables) \
-	$(cxx_executables) \
-	argv_from_file.manifest \
-	debug_log_file.manifest \
-	debug_log_inline.manifest \
-	env_from_file.manifest \
-	env_from_host.manifest \
-	file_check_policy_allow_all_but_log.manifest \
-	file_check_policy_strict.manifest \
-	init_fail2.manifest \
-	multi_pthread_exitless.manifest
+	$(cxx_executables-$(ARCH))
 
 target = \
-	argv_from_file \
-	debug_log_file \
-	debug_log_inline \
-	env_from_host \
-	env_from_file \
-	file_check_policy_allow_all_but_log \
-	file_check_policy_strict \
-	init_fail2 \
-	multi_pthread_exitless \
 	$(exec_target) \
-	$(manifests)
+	$(all_manifests)
 
 clean-extra += clean-tmp
 
 extra_rules = \
-	-e 's:\$$(RA_CLIENT_SPID):$(if $(RA_CLIENT_SPID),$(RA_CLIENT_SPID),):g' \
-	-e 's:\$$(RA_CLIENT_LINKABLE):$(if $(RA_CLIENT_LINKABLE),$(RA_CLIENT_LINKABLE),0):g'
+	-Dra_client_spid=$(if $(RA_CLIENT_SPID),$(RA_CLIENT_SPID),) \
+	-Dra_client_linkable=$(if $(RA_CLIENT_LINKABLE),$(RA_CLIENT_LINKABLE),0)
 
-include ../../../../Scripts/Makefile.manifest
+include ../../../../Scripts/manifest.mk
 include ../../../../Scripts/Makefile.Test
 
 CFLAGS-bootstrap_static = -static
@@ -171,32 +144,15 @@ CFLAGS-spinlock += -I$(PALDIR)/../include/lib -I$(PALDIR)/../include/arch/$(ARCH
 CFLAGS-sigaction_per_process += -pthread
 CFLAGS-signal_multithread += -pthread
 CFLAGS-pthread_set_get_affinity += -pthread
+CFLAGS-gettimeofday += -pthread
 
-CFLAGS-attestation += -I$(PALDIR)/../lib/crypto/mbedtls/crypto/include \
+CFLAGS-attestation += -I$(PALDIR)/../lib/crypto/mbedtls/include \
                       -I$(PALDIR)/host/Linux-SGX \
                       -I$(PALDIR)/../include/pal
 LDLIBS-attestation += $(PALDIR)/../lib/crypto/mbedtls/install/lib/libmbedcrypto.a
 
 CFLAGS-fp_multithread += -pthread -fno-builtin  # see comment in the test's source
 LDLIBS-fp_multithread += -lm
-
-# Handle multiple tests which share one binary (Graphene requires 1-1 manifest-executable
-# correspondence).
-
-argv_from_file env_from_host env_from_file: bootstrap
-	$(call cmd,ln_sfr)
-
-debug_log_file debug_log_inline: bootstrap
-	$(call cmd,ln_sfr)
-
-file_check_policy_allow_all_but_log file_check_policy_strict: file_check_policy
-	$(call cmd,ln_sfr)
-
-init_fail2: init_fail
-	$(call cmd,ln_sfr)
-
-multi_pthread_exitless: multi_pthread
-	$(call cmd,ln_sfr)
 
 %: %.c
 	$(call cmd,csingle)
@@ -214,4 +170,17 @@ libos-regression.xml: test_libos.py $(call expand_target_to_token,$(target))
 
 .PHONY: clean-tmp
 clean-tmp:
-	$(RM) -r *.tmp *.cached *.manifest.sgx *~ *.sig *.token .cache __pycache__ libos-regression.xml testfile tmp/*
+	$(RM) -r \
+		*.cached \
+		*.manifest \
+		*.manifest.sgx \
+		*.sig \
+		*.tmp \
+		*.token \
+		*~ \
+		.cache \
+		.pytest_cache \
+		__pycache__ \
+		libos-regression.xml \
+		testfile \
+		tmp/*

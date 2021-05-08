@@ -109,8 +109,8 @@ int _DkMutexLockTimeout(struct mutex_handle* m, int64_t timeout_us) {
 
         ret = INLINE_SYSCALL(futex, 6, &m->locked, FUTEX_WAIT, MUTEX_LOCKED, waittimep, NULL, 0);
 
-        if (IS_ERR(ret)) {
-            if (ERRNO(ret) == EWOULDBLOCK) {
+        if (ret < 0) {
+            if (ret == -EWOULDBLOCK) {
                 if (timeout_us >= 0) {
                     ret = -PAL_ERROR_TRYAGAIN;
                     __atomic_sub_fetch(&m->nwaiters.counter, 1, __ATOMIC_SEQ_CST);
@@ -118,9 +118,9 @@ int _DkMutexLockTimeout(struct mutex_handle* m, int64_t timeout_us) {
                 }
             } else {
 #ifdef DEBUG_MUTEX
-                printf("futex failed (err = %d)\n", ERRNO(ret));
+                log_error("futex failed (err = %d)\n", ret);
 #endif
-                ret = unix_to_pal_error(ERRNO(ret));
+                ret = unix_to_pal_error(ret);
                 __atomic_sub_fetch(&m->nwaiters.counter, 1, __ATOMIC_SEQ_CST);
                 goto out;
             }
@@ -138,7 +138,7 @@ out:
 
 #ifdef DEBUG_MUTEX
     if (ret < 0)
-        printf("mutex failed (%s, tid = %d)\n", PAL_STRERROR(ret), tid);
+        log_error("mutex failed (%s, tid = %d)\n", PAL_STRERROR(ret), tid);
 #endif
     return ret;
 }
@@ -151,8 +151,7 @@ int _DkMutexAcquireTimeout(PAL_HANDLE handle, int64_t timeout_us) {
     return _DkMutexLockTimeout(&handle->mutex.mut, timeout_us);
 }
 
-int _DkMutexUnlock(struct mutex_handle* m) {
-    int ret = 0;
+void _DkMutexUnlock(struct mutex_handle* m) {
     int need_wake;
 
 #ifdef DEBUG_MUTEX
@@ -167,13 +166,10 @@ int _DkMutexUnlock(struct mutex_handle* m) {
     /* If we need to wake someone up... */
     if (need_wake)
         INLINE_SYSCALL(futex, 6, &m->locked, FUTEX_WAKE, 1, NULL, NULL, 0);
-
-    return ret;
 }
 
 void _DkMutexRelease(PAL_HANDLE handle) {
     _DkMutexUnlock(&handle->mutex.mut);
-    return;
 }
 
 static bool _DkMutexIsLocked(struct mutex_handle* m) {
