@@ -285,7 +285,6 @@ static int tcp_listen(PAL_HANDLE* handle, char* uri, int create, int options) {
     int ipv6_v6only = create & PAL_CREATE_DUALSTACK ? 0 : 1;
     ret = ocall_listen(bind_addr->sa_family, sock_type(SOCK_STREAM, options), 0, ipv6_v6only,
                        bind_addr, &bind_addrlen, &sock_options);
-
     if (ret < 0)
         return unix_to_pal_error(ret);
 
@@ -476,7 +475,6 @@ static int udp_bind(PAL_HANDLE* handle, char* uri, int create, int options) {
     int ipv6_v6only = create & PAL_CREATE_DUALSTACK ? 0 : 1;
     ret = ocall_listen(bind_addr->sa_family, sock_type(SOCK_DGRAM, options), 0, ipv6_v6only,
                        bind_addr, &bind_addrlen, &sock_options);
-
     if (ret < 0)
         return unix_to_pal_error(ret);
 
