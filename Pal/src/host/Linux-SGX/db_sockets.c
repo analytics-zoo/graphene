@@ -287,11 +287,7 @@ static int tcp_listen(PAL_HANDLE* handle, char* uri, int create, int options) {
                        bind_addr, &bind_addrlen, &sock_options);
 
     if (ret < 0)
-	    pal_printf("@@@@@ocall_listen ERRNO = %d\n", ret);
-
-        return unix_to_pal_error(ERRNO(ret));
-    }
-
+        return unix_to_pal_error(ret);
 
     *handle = socket_create_handle(pal_type_tcpsrv, ret, options, bind_addr, bind_addrlen, NULL, 0,
                                    &sock_options);
@@ -482,12 +478,7 @@ static int udp_bind(PAL_HANDLE* handle, char* uri, int create, int options) {
                        bind_addr, &bind_addrlen, &sock_options);
 
     if (ret < 0)
-
-
-	    pal_printf("@@@@@ocall_listen ERRNO = %d\n", ret);
-        return unix_to_pal_error(ERRNO(ret));
-    }
-
+        return unix_to_pal_error(ret);
 
     *handle = socket_create_handle(pal_type_udpsrv, ret, options, bind_addr, bind_addrlen, NULL, 0,
                                    &sock_options);
