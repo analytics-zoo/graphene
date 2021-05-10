@@ -226,8 +226,11 @@ enum {
 #define MSG_OOB      MSG_OOB
 #define MSG_PEEK     MSG_PEEK
 #define MSG_DONTWAIT MSG_DONTWAIT
-
 #define MSG_WAITALL  MSG_WAITALL
+#define MSG_NOSIGNAL MSG_NOSIGNAL
+};
+
+struct msghdr {
     void* msg_name;  /* Address to send to/receive from.  */
     int msg_namelen; /* Length of address data.  */
 
