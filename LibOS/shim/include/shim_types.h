@@ -228,7 +228,6 @@ enum {
 #define MSG_DONTWAIT MSG_DONTWAIT
 #define MSG_WAITALL  MSG_WAITALL
 #define MSG_NOSIGNAL MSG_NOSIGNAL
-
 };
 
 struct msghdr{
