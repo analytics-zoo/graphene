@@ -392,8 +392,6 @@ static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void*
             return -PAL_ERROR_NOTCONNECTION;
 
         bytes = _DkStreamSecureRead(handle->pipe.ssl_ctx, buffer, len);
-	if (bytes < 0) SGX_DBG(DBG_E, "@@@@@@_DkStreamSecureRead returns %ld\n", bytes);
-    }
 
     return bytes;
 }
@@ -430,8 +428,7 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
             return -PAL_ERROR_NOTCONNECTION;
 
         bytes = _DkStreamSecureWrite(handle->pipe.ssl_ctx, buffer, len);
-	if (bytes < 0) SGX_DBG(DBG_E, "@@@@@@_DkStreamSecureWrite returns %ld\n", bytes);
-    }
+
 
     return bytes;
 }
