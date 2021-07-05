@@ -230,7 +230,7 @@ enum {
 #define MSG_NOSIGNAL MSG_NOSIGNAL
 };
 
-struct msghdr {
+struct msghdr{
     void* msg_name;  /* Address to send to/receive from.  */
     int msg_namelen; /* Length of address data.  */
 
